@@ -10,6 +10,7 @@ import { ClipPlaneManager } from './src/ClipPlaneManager.js';
 import { UnitManager } from './src/UnitManager.js';
 import { AnnotationManager } from './src/AnnotationManager.js';
 import { PhaseManager } from './src/PhaseManager.js';
+import { ViewpointManager } from './src/ViewpointManager.js';
 
 // ============================================================
 //  WoW-Style 3D Raid Tactics Planner
@@ -44,42 +45,6 @@ let navSections = {
   annotate: { open: false, active: false }
 };
 
-// ─── VIEWPOINT MANAGEMENT ──────────────────────────────────
-function getCurrentViewpointGroups() {
-  const sd = dataStore.getCurrentSceneData();
-  return sd?.viewpointGroups || [];
-}
-
-function getCurrentCameraState() {
-  return {
-    pos: { x: sceneManager.getCamera().position.x, y: sceneManager.getCamera().position.y, z: sceneManager.getCamera().position.z },
-    target: { x: sceneManager.getControls().target.x, y: sceneManager.getControls().target.y, z: sceneManager.getControls().target.z },
-    quaternion: { x: sceneManager.getCamera().quaternion.x, y: sceneManager.getCamera().quaternion.y, z: sceneManager.getCamera().quaternion.z, w: sceneManager.getCamera().quaternion.w }
-  };
-}
-
-function jumpToViewpoint(vp) {
-  if (sceneManager.freeRoamMode) toggleFreeRoamMode();
-  sceneManager.getCamera().position.set(vp.pos.x, vp.pos.y, vp.pos.z);
-  sceneManager.getControls().target.set(vp.target.x, vp.target.y, vp.target.z);
-  if (vp.quaternion) sceneManager.getCamera().quaternion.set(vp.quaternion.x, vp.quaternion.y, vp.quaternion.z, vp.quaternion.w);
-  sceneManager.getControls().update();
-  showToast(`📷 ${vp.name}`);
-}
-
-function saveCurrentViewpoint(name) {
-  const sd = dataStore.getCurrentSceneData();
-  if (!sd) return;
-  if (!sd.viewpointGroups) sd.viewpointGroups = [{ id: 'vp_default', name: '📌 常用视角', collapsed: false, viewpoints: [] }];
-  const id = `vp_${Date.now()}`;
-  const vp = { id, name, ...getCurrentCameraState() };
-  const group = sd.viewpointGroups.find(g => g.id === 'vp_default') || sd.viewpointGroups[0];
-  if (!group.viewpoints) group.viewpoints = [];
-  group.viewpoints.push(vp);
-  renderViewpointSelector();
-  return vp;
-}
-
 // ─── CUSTOM ITEMS REGISTRY ────────────────────────────────
 // ─── LOAD CUSTOM ITEMS ──────────────────────────────────────
 // ─── DATA STORE ──────────────────────────────────────────────
@@ -98,6 +63,9 @@ dataStore.currentSceneId = 'scene01';
 
 const modelManager = new ModelManager(sceneManager, dataStore);
 const clipPlaneManager = new ClipPlaneManager(sceneManager, modelManager);
+
+// ─── VIEWPOINT MANAGEMENT ──────────────────────────────────
+const viewpointManager = new ViewpointManager(sceneManager, dataStore);
 
 // ─── LOADERS ────────────────────────────────────────────────
 const tgaLoader = new TGALoader();
@@ -1524,7 +1492,8 @@ function wireUIEvents() {
   document.getElementById('saveViewpointBtn')?.addEventListener('click', () => {
     const name = prompt('输入视角名称:', '新视角');
     if (!name) return;
-    saveCurrentViewpoint(name);
+    viewpointManager.saveViewpoint(name, 'vp_default');
+    renderViewpointSelector();
     showToast(`✅ 已保存视角: ${name}`);
   });
   renderViewpointSelector();
@@ -1905,7 +1874,10 @@ function renderViewpointSelector() {
       if (e.target.closest('[data-vp-action]')) return;
       const vpid = card.dataset.vpid;
       const vp = vpGroups.flatMap(g => g.viewpoints || []).find(v => v.id === vpid);
-      if (vp) jumpToViewpoint(vp);
+      if (vp) {
+        viewpointManager.jumpToViewpoint(vp);
+        showToast(`📷 ${vp.name}`);
+      }
     });
   });
 
@@ -1917,7 +1889,7 @@ function renderViewpointSelector() {
       const group = vpGroups.find(x => x.id === btn.dataset.gid);
       if (!group) return;
       if (!group.viewpoints) group.viewpoints = [];
-      const vp = { id: `vp_${Date.now()}`, name, ...getCurrentCameraState() };
+      const vp = { id: `vp_${Date.now()}`, name, ...viewpointManager.getCurrentCameraState() };
       group.viewpoints.push(vp);
       renderViewpointSelector();
       showToast(`✅ 已保存视角: ${name}`);
