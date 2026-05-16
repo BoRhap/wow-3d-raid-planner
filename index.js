@@ -6,6 +6,7 @@ import { UNIT_CATEGORIES, CUSTOM_ITEM_DEFS, DEFAULT_GROUND_WIDTH, DEFAULT_GROUND
 import { DataStore } from './src/DataStore.js';
 import { SceneManager } from './src/SceneManager.js';
 import { ModelManager } from './src/ModelManager.js';
+import { ClipPlaneManager } from './src/ClipPlaneManager.js';
 
 // ============================================================
 //  WoW-Style 3D Raid Tactics Planner
@@ -30,13 +31,6 @@ let dragTarget = null;
 
 // ─── SCENE MANAGER ──────────────────────────────────────────
 const sceneManager = new SceneManager();
-
-// ─── CLIPPING PLANE STATE ──────────────────────────────────
-let clipEnabled = false;
-let clipHeight = 100;
-let clipPlane = new THREE.Plane(new THREE.Vector3(0, -1, 0), 100);
-let clipPlaneHelper = null;
-
 
 const unitMeshes = [];
 const unitLabelSprites = [];
@@ -136,6 +130,7 @@ dataStore.initSceneData('scene02', '场景02', { dataUrl: naxx02Glb, fileName: '
 dataStore.currentSceneId = 'scene01';
 
 const modelManager = new ModelManager(sceneManager, dataStore);
+const clipPlaneManager = new ClipPlaneManager(sceneManager, modelManager);
 
 // ─── LOADERS ────────────────────────────────────────────────
 const tgaLoader = new TGALoader();
@@ -154,8 +149,7 @@ function init() {
 
   const sd = dataStore.getCurrentSceneData();
   if (sd.model) modelManager.loadModelIntoScene(sd.model, () => {
-    clipHeight = modelManager.clipModelMaxY + 1;
-    clipPlane.constant = clipHeight;
+    clipPlaneManager.setHeight(modelManager.clipModelMaxY + 1);
     updateClipSliderRange();
   });
 
@@ -935,8 +929,7 @@ function applySceneModel(sd, onReady) {
   if (currentModel) { sceneManager.getScene().remove(currentModel); }
   if (sd.model) {
     modelManager.loadModelIntoScene(sd.model, () => {
-      clipHeight = modelManager.clipModelMaxY + 1;
-      clipPlane.constant = clipHeight;
+      clipPlaneManager.setHeight(modelManager.clipModelMaxY + 1);
       updateClipSliderRange();
       if (onReady) onReady();
     });
@@ -1082,56 +1075,12 @@ async function handleSingleModelUpload(file) {
 }
 
 // ─── CLIP PLANE ─────────────────────────────────────────────
-function setClipEnabled(enabled) {
-  clipEnabled = enabled;
-  const currentModel = modelManager.getCurrentModel();
-  if (currentModel) {
-    currentModel.traverse(child => {
-      if (child.isMesh) {
-        const mats = Array.isArray(child.material) ? child.material : [child.material];
-        mats.forEach(m => { m.clippingPlanes = enabled ? [clipPlane] : []; m.clipShadows = enabled; m.needsUpdate = true; });
-      }
-    });
-  }
-  if (enabled) { if (!clipPlaneHelper) createClipPlaneVisual(); clipPlaneHelper.visible = true; }
-  else { if (clipPlaneHelper) clipPlaneHelper.visible = false; }
-  const ind = document.getElementById('clipHeightIndicator');
-  if (ind) ind.style.display = enabled ? 'block' : 'none';
-}
-
-function setClipHeight(val) {
-  clipHeight = val; clipPlane.constant = val;
-  if (clipPlaneHelper) clipPlaneHelper.position.y = val;
-  const el = document.getElementById('clipHeightValue'); if (el) el.textContent = val.toFixed(1);
-}
-
-function createClipPlaneVisual() {
-  if (clipPlaneHelper) sceneManager.getScene().remove(clipPlaneHelper);
-  const group = new THREE.Group(); group.name = 'clipPlaneHelper';
-  const s = Math.max(sceneManager.groundWidth, sceneManager.groundHeight) * 1.2;
-  const planeGeo = new THREE.PlaneGeometry(s, s);
-  const planeMat = new THREE.MeshBasicMaterial({ color: 0xff4444, transparent: true, opacity: 0.06, side: THREE.DoubleSide, depthWrite: false });
-  const mesh = new THREE.Mesh(planeGeo, planeMat); mesh.rotation.x = -Math.PI / 2; group.add(mesh);
-  const ringGeo = new THREE.RingGeometry(s * 0.48, s * 0.5, 64);
-  const ringMat = new THREE.MeshBasicMaterial({ color: 0xff4444, transparent: true, opacity: 0.2, side: THREE.DoubleSide, depthWrite: false });
-  const ring = new THREE.Mesh(ringGeo, ringMat); ring.rotation.x = -Math.PI / 2; group.add(ring);
-  const half = s * 0.4;
-  const lineMat = new THREE.LineBasicMaterial({ color: 0xff6666, transparent: true, opacity: 0.1 });
-  for (let i = 0; i <= 12; i++) {
-    const t = (i / 12) * 2 - 1;
-    group.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(t * half, 0, -half), new THREE.Vector3(t * half, 0, half)]), lineMat));
-    group.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(-half, 0, t * half), new THREE.Vector3(half, 0, t * half)]), lineMat));
-  }
-  group.position.y = clipHeight; group.visible = clipEnabled;
-  sceneManager.getScene().add(group); clipPlaneHelper = group;
-}
-
 function updateClipSliderRange() {
+  const range = clipPlaneManager.updateRange();
   const slider = document.getElementById('clipHeightSlider'); if (!slider) return;
-  const margin = (modelManager.clipModelMaxY - modelManager.clipModelMinY) * 0.05;
-  slider.min = modelManager.clipModelMinY; slider.max = modelManager.clipModelMaxY + margin;
-  slider.step = ((modelManager.clipModelMaxY - modelManager.clipModelMinY) / 200).toFixed(3); slider.value = clipHeight;
-  const valEl = document.getElementById('clipHeightValue'); if (valEl) valEl.textContent = clipHeight.toFixed(1);
+  slider.min = range.min; slider.max = range.max;
+  slider.step = ((range.max - range.min) / 200).toFixed(3); slider.value = clipPlaneManager.height;
+  const valEl = document.getElementById('clipHeightValue'); if (valEl) valEl.textContent = clipPlaneManager.height.toFixed(1);
   const rangeEl = document.getElementById('clipRangeInfo'); if (rangeEl) rangeEl.textContent = `${modelManager.clipModelMinY.toFixed(1)} ~ ${modelManager.clipModelMaxY.toFixed(1)}`;
 }
 
@@ -1942,8 +1891,8 @@ function buildUI() {
             <span class="t-icon">✂️</span><span class="t-label">Z轴剖切</span><span class="t-status" id="clipStatusDot" style="background:#475569;"></span>
           </button>
           <div id="clipControls" class="nav-control-group" style="display:none; margin-left:4px;">
-            <div class="nav-control-label">剖切高度 <span class="val" id="clipHeightValue">${clipHeight.toFixed(1)}</span></div>
-            <div class="nav-slider-row"><span class="sl">底</span><input type="range" id="clipHeightSlider" min="${modelManager.clipModelMinY}" max="${modelManager.clipModelMaxY}" step="0.5" value="${clipHeight}" /><span class="sl">顶</span></div>
+            <div class="nav-control-label">剖切高度 <span class="val" id="clipHeightValue">${clipPlaneManager.height.toFixed(1)}</span></div>
+            <div class="nav-slider-row"><span class="sl">底</span><input type="range" id="clipHeightSlider" min="${modelManager.clipModelMinY}" max="${modelManager.clipModelMaxY}" step="0.5" value="${clipPlaneManager.height}" /><span class="sl">顶</span></div>
             <div style="display:flex; align-items:center; justify-content:space-between; margin-top:3px;">
               <span style="font-size:8px; color:#3b4050;">范围: <span id="clipRangeInfo">${modelManager.clipModelMinY.toFixed(1)} ~ ${modelManager.clipModelMaxY.toFixed(1)}</span></span>
             </div>
@@ -2259,19 +2208,25 @@ function wireUIEvents() {
 
   // ─── Clip plane ───
   document.getElementById('clipToggleBtn')?.addEventListener('click', () => {
-    clipEnabled = !clipEnabled; setClipEnabled(clipEnabled);
+    const enabled = clipPlaneManager.toggle();
     const dot = document.getElementById('clipStatusDot');
-    if (dot) dot.style.background = clipEnabled ? '#ef4444' : '#475569';
+    if (dot) dot.style.background = enabled ? '#ef4444' : '#475569';
     const ctrl = document.getElementById('clipControls');
-    if (ctrl) ctrl.style.display = clipEnabled ? 'block' : 'none';
-    document.getElementById('clipToggleBtn')?.classList.toggle('active', clipEnabled);
-    showToast(clipEnabled ? '✂️ 剖切面已启用' : '✂️ 剖切面已关闭');
+    if (ctrl) ctrl.style.display = enabled ? 'block' : 'none';
+    document.getElementById('clipToggleBtn')?.classList.toggle('active', enabled);
+    const ind = document.getElementById('clipHeightIndicator');
+    if (ind) ind.style.display = enabled ? 'block' : 'none';
+    showToast(enabled ? '✂️ 剖切面已启用' : '✂️ 剖切面已关闭');
   });
-  document.getElementById('clipHeightSlider')?.addEventListener('input', (e) => setClipHeight(parseFloat(e.target.value)));
-  document.getElementById('clipQuarter')?.addEventListener('click', () => { const v = modelManager.clipModelMinY + (modelManager.clipModelMaxY - modelManager.clipModelMinY) * 0.25; setClipHeight(v); document.getElementById('clipHeightSlider').value = v; });
-  document.getElementById('clipHalf')?.addEventListener('click', () => { const v = modelManager.clipModelMinY + (modelManager.clipModelMaxY - modelManager.clipModelMinY) * 0.5; setClipHeight(v); document.getElementById('clipHeightSlider').value = v; });
-  document.getElementById('clipThreeQuarter')?.addEventListener('click', () => { const v = modelManager.clipModelMinY + (modelManager.clipModelMaxY - modelManager.clipModelMinY) * 0.75; setClipHeight(v); document.getElementById('clipHeightSlider').value = v; });
-  document.getElementById('clipFull')?.addEventListener('click', () => { const v = modelManager.clipModelMaxY + 1; setClipHeight(v); document.getElementById('clipHeightSlider').value = v; });
+  document.getElementById('clipHeightSlider')?.addEventListener('input', (e) => {
+    const v = parseFloat(e.target.value);
+    clipPlaneManager.setHeight(v);
+    const el = document.getElementById('clipHeightValue'); if (el) el.textContent = v.toFixed(1);
+  });
+  document.getElementById('clipQuarter')?.addEventListener('click', () => { const v = modelManager.clipModelMinY + (modelManager.clipModelMaxY - modelManager.clipModelMinY) * 0.25; clipPlaneManager.setHeight(v); document.getElementById('clipHeightSlider').value = v; const el = document.getElementById('clipHeightValue'); if (el) el.textContent = v.toFixed(1); });
+  document.getElementById('clipHalf')?.addEventListener('click', () => { const v = modelManager.clipModelMinY + (modelManager.clipModelMaxY - modelManager.clipModelMinY) * 0.5; clipPlaneManager.setHeight(v); document.getElementById('clipHeightSlider').value = v; const el = document.getElementById('clipHeightValue'); if (el) el.textContent = v.toFixed(1); });
+  document.getElementById('clipThreeQuarter')?.addEventListener('click', () => { const v = modelManager.clipModelMinY + (modelManager.clipModelMaxY - modelManager.clipModelMinY) * 0.75; clipPlaneManager.setHeight(v); document.getElementById('clipHeightSlider').value = v; const el = document.getElementById('clipHeightValue'); if (el) el.textContent = v.toFixed(1); });
+  document.getElementById('clipFull')?.addEventListener('click', () => { const v = modelManager.clipModelMaxY + 1; clipPlaneManager.setHeight(v); document.getElementById('clipHeightSlider').value = v; const el = document.getElementById('clipHeightValue'); if (el) el.textContent = v.toFixed(1); });
 
   // ─── Viewpoint management ───
   document.getElementById('saveViewpointBtn')?.addEventListener('click', () => {
