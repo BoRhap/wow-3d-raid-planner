@@ -9,6 +9,7 @@ import { ModelManager } from './src/ModelManager.js';
 import { ClipPlaneManager } from './src/ClipPlaneManager.js';
 import { UnitManager } from './src/UnitManager.js';
 import { AnnotationManager } from './src/AnnotationManager.js';
+import { PhaseManager } from './src/PhaseManager.js';
 
 // ============================================================
 //  WoW-Style 3D Raid Tactics Planner
@@ -27,7 +28,6 @@ function downloadJson(data, filename) {
 // ─── GLOBALS ────────────────────────────────────────────────
 let raycaster, mouse;
 let arrowStart = null;
-let animating = false;
 let isDragging = false;
 let dragTarget = null;
 
@@ -103,6 +103,7 @@ const clipPlaneManager = new ClipPlaneManager(sceneManager, modelManager);
 const tgaLoader = new TGALoader();
 const unitManager = new UnitManager(sceneManager, dataStore, modelManager, tgaLoader);
 const annotationManager = new AnnotationManager(sceneManager, dataStore, unitManager);
+const phaseManager = new PhaseManager(dataStore, unitManager, annotationManager, sceneManager, modelManager);
 
 // ─── INIT ───────────────────────────────────────────────────
 function init() {
@@ -251,42 +252,16 @@ window.setEditColor = setEditColor;
 
 // ─── SAVE / LOAD ────────────────────────────────────────────
 function saveCurrentState() {
+  // Delegated to phaseManager — kept for external callers (export, scene switch)
   dataStore.savePhaseState(unitManager.meshes, annotationManager.meshes);
 }
 
 function clearSceneObjects() {
-  unitManager.meshes.forEach(m => sceneManager.getScene().remove(m)); unitManager.meshes.length = 0;
-  unitManager.labelSprites.forEach(s => sceneManager.getScene().remove(s)); unitManager.labelSprites.length = 0;
-  annotationManager.clearAll();
+  phaseManager.clearSceneObjects();
 }
 
 function loadPhaseState(phase) {
-  clearSceneObjects();
-  if (phase.units) phase.units.forEach(u => {
-    let mesh;
-    if (unitManager.customItemsRegistry[u.type]) {
-      mesh = unitManager.createCustomMesh(u.type, u.x, u.z, u.label, u.unitScale);
-    } else {
-      mesh = unitManager.createUnitMesh(u.type, u.x, u.z, u.label, u.unitScale);
-    }
-    mesh.name = u.name;
-    if (u.y !== undefined && u.y !== 0) mesh.position.y = u.y;
-    else mesh.position.y = modelManager.getModelSurfaceHeight(u.x, u.z);
-    if (u.rx !== undefined) mesh.rotation.x = u.rx;
-    if (u.ry !== undefined) mesh.rotation.y = u.ry;
-    if (u.rz !== undefined) mesh.rotation.z = u.rz;
-    // 同步sprite位置，确保sprite在mesh上方且不低于最小高度
-    const sprite = unitManager.labelSprites.find(s => s.userData.parentUnit === mesh);
-    if (sprite) {
-      const targetY = Math.max(mesh.position.y + sprite.userData.offsetY, 0.5);
-      sprite.position.set(mesh.position.x, targetY, mesh.position.z);
-    }
-  });
-  if (phase.annotations) phase.annotations.forEach(a => {
-    if (a.type === 'arrow' && a.start && a.end) annotationManager.createArrowAnnotation(new THREE.Vector3(a.start.x, a.start.y || 0, a.start.z), new THREE.Vector3(a.end.x, a.end.y || 0, a.end.z), a.color);
-    else if (a.type === 'zone' && a.center) annotationManager.createZoneAnnotation(new THREE.Vector3(a.center.x, a.center.y || 0, a.center.z), a.radius, a.color, a.label);
-    else if (a.type === 'label' && a.pos) annotationManager.createLabelAnnotation(new THREE.Vector3(a.pos.x, a.pos.y || 0, a.pos.z), a.text);
-  });
+  phaseManager.loadPhaseState(phase);
 }
 
 // ─── SCENE IMPORT / EXPORT ──────────────────────────────────
@@ -372,7 +347,7 @@ function applySceneModel(sd, onReady) {
 }
 
 function switchScene(sceneId) {
-  if (sceneId === dataStore.currentSceneId || animating) return;
+  if (sceneId === dataStore.currentSceneId || phaseManager.animating) return;
   saveCurrentState(); dataStore.currentSceneId = sceneId;
   const sd = dataStore.getCurrentSceneData(); if (!sd) return;
   dataStore.currentPhase = sd.currentPhase || 0;
@@ -384,88 +359,10 @@ function switchScene(sceneId) {
 }
 
 function switchPhase(newIdx, withAnimation = true) {
-  const phases = dataStore.getPhases();
-  if (newIdx === dataStore.currentPhase || newIdx < 0 || newIdx >= phases.length || animating) return;
-  saveCurrentState();
-  const oldPhase = phases[dataStore.currentPhase], newPhase = phases[newIdx];
-  if (withAnimation && oldPhase.units?.length > 0 && newPhase.units?.length > 0) {
-    animatePhaseTransition(oldPhase, newPhase, () => {
-      dataStore.currentPhase = newIdx; dataStore.getCurrentSceneData().currentPhase = dataStore.currentPhase;
-      renderPhaseBar(); updateUnitList();
-    });
-  } else {
-    dataStore.currentPhase = newIdx; dataStore.getCurrentSceneData().currentPhase = dataStore.currentPhase;
-    loadPhaseState(newPhase); renderPhaseBar(); updateUnitList();
-  }
+  phaseManager.switchPhase(newIdx, withAnimation, () => { renderPhaseBar(); updateUnitList(); });
 }
 
-function animatePhaseTransition(oldP, newP, callback) {
-  animating = true; const duration = 1.2; let elapsed = 0;
-  const pairs = [];
-  if (newP.units) newP.units.forEach(nu => {
-    const existing = unitManager.meshes.find(m => m.name === nu.name);
-    if (existing) {
-      const toY = nu.y !== undefined ? nu.y : modelManager.getModelSurfaceHeight(nu.x, nu.z);
-      pairs.push({ mesh: existing, from: { x: existing.position.x, y: existing.position.y, z: existing.position.z }, to: { x: nu.x, y: toY, z: nu.z } });
-    }
-  });
-  const existingNames = unitManager.meshes.map(m => m.name);
-  const toAdd = (newP.units || []).filter(nu => !existingNames.includes(nu.name));
-  const newNames = (newP.units || []).map(nu => nu.name);
-  const toRemove = unitManager.meshes.filter(m => !newNames.includes(m.name));
-
-  function frame() {
-    elapsed += sceneManager.getClock().getDelta();
-    const t = Math.min(elapsed / duration, 1);
-    const ease = t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
-    pairs.forEach(p => {
-      p.mesh.position.x = p.from.x + (p.to.x - p.from.x) * ease;
-      p.mesh.position.z = p.from.z + (p.to.z - p.from.z) * ease;
-      const baseY = p.from.y + (p.to.y - p.from.y) * ease;
-      const midY = modelManager.getModelSurfaceHeight(p.mesh.position.x, p.mesh.position.z);
-      p.mesh.position.y = Math.max(baseY, midY) + Math.sin(ease * Math.PI) * 2.0;
-      unitManager.updateUnitSprite(p.mesh);
-    });
-    toRemove.forEach(m => m.scale.setScalar((1 - ease) * (m.userData.unitScale || 0.1)));
-    pairs.forEach(p => { if (t > 0.05 && t < 0.95 && Math.random() < 0.3) createTrailParticle(p.mesh.position); });
-    sceneManager.getControls().update(); sceneManager.getRenderer().render(sceneManager.getScene(), sceneManager.getCamera());
-    if (t >= 1) {
-      toRemove.forEach(m => {
-        sceneManager.getScene().remove(m); const idx = unitManager.meshes.indexOf(m); if (idx > -1) unitManager.meshes.splice(idx, 1);
-        const spriteIdx = unitManager.labelSprites.findIndex(s => s.userData.parentUnit === m);
-        if (spriteIdx > -1) { sceneManager.getScene().remove(unitManager.labelSprites[spriteIdx]); unitManager.labelSprites.splice(spriteIdx, 1); }
-      });
-      toAdd.forEach(nu => {
-        const m = unitManager.createUnitMesh(nu.type, nu.x, nu.z, nu.label, nu.unitScale);
-        m.position.y = nu.y !== undefined ? nu.y : modelManager.getModelSurfaceHeight(nu.x, nu.z);
-        if (nu.rx !== undefined) m.rotation.x = nu.rx;
-        if (nu.ry !== undefined) m.rotation.y = nu.ry;
-        if (nu.rz !== undefined) m.rotation.z = nu.rz;
-        unitManager.updateUnitSprite(m);
-      });
-      pairs.forEach(p => {
-        p.mesh.position.y = p.to.y;
-        unitManager.updateUnitSprite(p.mesh);
-      });
-      annotationManager.clearAll();
-      if (newP.annotations) newP.annotations.forEach(a => {
-        if (a.type === 'arrow' && a.start && a.end) annotationManager.createArrowAnnotation(new THREE.Vector3(a.start.x, a.start.y || 0, a.start.z), new THREE.Vector3(a.end.x, a.end.y || 0, a.end.z), a.color);
-        else if (a.type === 'zone' && a.center) annotationManager.createZoneAnnotation(new THREE.Vector3(a.center.x, a.center.y || 0, a.center.z), a.radius, a.color, a.label);
-        else if (a.type === 'label' && a.pos) annotationManager.createLabelAnnotation(new THREE.Vector3(a.pos.x, a.pos.y || 0, a.pos.z), a.text);
-      });
-      animating = false; sceneManager.getRenderer().setAnimationLoop(() => sceneManager.animate(unitManager.meshes, annotationManager.meshes, dataStore.selectedUnit));
-      if (callback) callback(); return;
-    }
-    sceneManager.getRenderer().setAnimationLoop(frame);
-  }
-  sceneManager.getRenderer().setAnimationLoop(frame);
-}
-
-function createTrailParticle(pos) {
-  const p = new THREE.Mesh(new THREE.SphereGeometry(0.08, 6, 6), new THREE.MeshBasicMaterial({ color: 0xa855f7, transparent: true, opacity: 0.6 }));
-  p.position.copy(pos); p.position.x += (Math.random() - 0.5) * 0.3; p.position.z += (Math.random() - 0.5) * 0.3;
-  sceneManager.getScene().add(p); setTimeout(() => sceneManager.getScene().remove(p), 500);
-}
+// animatePhaseTransition and createTrailParticle moved to PhaseManager
 
 // ─── MODEL UPLOAD ───────────────────────────────────────────
 async function handleModelUpload(files, targetGroupId) {
@@ -585,7 +482,7 @@ function bindEvents() {
 }
 
 function onCanvasClick(e) {
-  if (animating || sceneManager.freeRoamMode) return;
+  if (phaseManager.animating || sceneManager.freeRoamMode) return;
   const point = getGroundIntersect(e);
   if (!point) return;
   const halfW = sceneManager.groundWidth / 2 - 1, halfH = sceneManager.groundHeight / 2 - 1;
@@ -639,14 +536,14 @@ function onCanvasClick(e) {
 }
 
 function onMouseDown(e) {
-  if (animating || dataStore.placementMode) return;
+  if (phaseManager.animating || dataStore.placementMode) return;
   const unit = getUnitIntersect(e);
   if (unit) { isDragging = true; dragTarget = unit; sceneManager.getControls().enabled = false; }
 }
 function onMouseUp() { if (isDragging) { isDragging = false; dragTarget = null; sceneManager.getControls().enabled = true; } }
 
 function onCanvasMouseMove(e) {
-  if (animating) return;
+  if (phaseManager.animating) return;
   if (isDragging && dragTarget) {
     const point = getGroundIntersect(e);
     if (point) {
@@ -2152,15 +2049,11 @@ function renderPhaseBar() {
     if (name) { phases.push({ name, units: [], annotations: [] }); renderPhaseBar(); showToast(`✅ 已添加阶段: ${name}`); }
   });
   document.getElementById('playAllBtn')?.addEventListener('click', () => {
-    const phases = dataStore.getPhases();
-    if (phases.length < 2) { showToast('⚠️ 至少需要两个阶段'); return; }
-    let idx = 0;
-    const play = () => {
-      if (idx >= phases.length - 1) { showToast('✅ 演示完成'); return; }
-      switchPhase(idx + 1, true); idx++;
-      setTimeout(play, 2000);
-    };
-    switchPhase(0, false); setTimeout(play, 1000);
+    phaseManager.startAutoPlay(
+      () => { renderPhaseBar(); updateUnitList(); },
+      () => { showToast('⚠️ 至少需要两个阶段'); },
+      () => { showToast('✅ 演示完成'); }
+    );
   });
 }
 
