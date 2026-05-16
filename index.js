@@ -1,13 +1,11 @@
 import * as THREE from 'three';
-import { FBXLoader } from 'three/addons/loaders/FBXLoader.js';
-import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
-import { DRACOLoader } from 'three/addons/loaders/DRACOLoader.js';
 import { TGALoader } from 'three/addons/loaders/TGALoader.js';
 import naxx01Glb from './src/map/naxx-01.glb?url';
 import naxx02Glb from './src/map/naxx-02.glb?url';
 import { UNIT_CATEGORIES, CUSTOM_ITEM_DEFS, DEFAULT_GROUND_WIDTH, DEFAULT_GROUND_HEIGHT } from './src/Constants.js';
 import { DataStore } from './src/DataStore.js';
 import { SceneManager } from './src/SceneManager.js';
+import { ModelManager } from './src/ModelManager.js';
 
 // ============================================================
 //  WoW-Style 3D Raid Tactics Planner
@@ -38,14 +36,11 @@ let clipEnabled = false;
 let clipHeight = 100;
 let clipPlane = new THREE.Plane(new THREE.Vector3(0, -1, 0), 100);
 let clipPlaneHelper = null;
-let clipModelMinY = 0;
-let clipModelMaxY = 100;
 
 
 const unitMeshes = [];
 const unitLabelSprites = [];
 const annotationMeshes = [];
-let currentSceneModel = null;
 
 // ─── SIDEBAR STATE ─────────────────────────────────────────
 let sidebarCollapsed = false;
@@ -140,12 +135,9 @@ dataStore.initSceneData('scene01', '场景01', { dataUrl: naxx01Glb, fileName: '
 dataStore.initSceneData('scene02', '场景02', { dataUrl: naxx02Glb, fileName: 'naxx-02.glb', type: 'glb' });
 dataStore.currentSceneId = 'scene01';
 
+const modelManager = new ModelManager(sceneManager, dataStore);
+
 // ─── LOADERS ────────────────────────────────────────────────
-const fbxLoader = new FBXLoader();
-const gltfLoader = new GLTFLoader();
-const dracoLoader = new DRACOLoader();
-dracoLoader.setDecoderPath('https://www.gstatic.com/draco/versioned/decoders/1.5.7/');
-gltfLoader.setDRACOLoader(dracoLoader);
 const tgaLoader = new TGALoader();
 
 // ─── INIT ───────────────────────────────────────────────────
@@ -161,7 +153,11 @@ function init() {
   bindEvents();
 
   const sd = dataStore.getCurrentSceneData();
-  if (sd.model) loadModelIntoScene(sd.model);
+  if (sd.model) modelManager.loadModelIntoScene(sd.model, () => {
+    clipHeight = modelManager.clipModelMaxY + 1;
+    clipPlane.constant = clipHeight;
+    updateClipSliderRange();
+  });
 
   sceneManager.getRenderer().setAnimationLoop(() => {
     sceneManager.animate(unitMeshes, annotationMeshes, dataStore.selectedUnit);
@@ -175,78 +171,7 @@ function init() {
 
 
 // ─── MODEL LOADING ──────────────────────────────────────────
-function loadModelIntoScene(modelInfo, callback) {
-  if (!modelInfo || !modelInfo.dataUrl) { if (callback) callback(); return; }
-  if (currentSceneModel) { sceneManager.getScene().remove(currentSceneModel); currentSceneModel = null; }
-  showToast('⏳ 正在加载3D模型...');
-
-  const onLoaded = (object) => {
-    const model = object.scene ? object.scene : object;
-    const box = new THREE.Box3().setFromObject(model);
-    const size = box.getSize(new THREE.Vector3());
-    const center = box.getCenter(new THREE.Vector3());
-    const maxDim = Math.max(size.x, size.y, size.z);
-    const scaleFactor = maxDim > 0 ? 60 / maxDim : 1;
-    model.scale.multiplyScalar(scaleFactor);
-    box.setFromObject(model); box.getSize(size); box.getCenter(center);
-    model.position.x -= center.x; model.position.z -= center.z; model.position.y -= box.min.y;
-
-    model.traverse((child) => {
-      if (child.isMesh) {
-        child.castShadow = true; child.receiveShadow = true;
-        if (child.geometry) { if (!child.geometry.attributes.normal) child.geometry.computeVertexNormals(); child.geometry.computeBoundingSphere(); }
-        const mats = Array.isArray(child.material) ? child.material : [child.material];
-        const fixedMats = mats.map(m => {
-          const nm = new THREE.MeshStandardMaterial();
-          if (m.color) { const c = m.color; nm.color.set((c.r < 0.05 && c.g < 0.05 && c.b < 0.05) ? 0x888888 : c); } else nm.color.set(0xaaaaaa);
-          if (m.map) { nm.map = m.map; nm.map.colorSpace = THREE.SRGBColorSpace; nm.map.needsUpdate = true; }
-          if (m.normalMap) nm.normalMap = m.normalMap;
-          if (m.emissive && (m.emissive.r > 0 || m.emissive.g > 0 || m.emissive.b > 0)) {
-            nm.emissive.copy(m.emissive); nm.emissiveIntensity = m.emissiveIntensity || 0.5;
-            if (m.emissiveMap) nm.emissiveMap = m.emissiveMap;
-          }
-          if (m.transparent) { nm.transparent = true; nm.opacity = m.opacity ?? 1; }
-          if (m.alphaMap) { nm.alphaMap = m.alphaMap; nm.transparent = true; }
-          if (m.opacity !== undefined && m.opacity < 1) { nm.transparent = true; nm.opacity = m.opacity; }
-          nm.side = THREE.DoubleSide; nm.roughness = 0.6; nm.metalness = 0.1;
-          if (m.aoMap) nm.aoMap = m.aoMap;
-          if (m.specularMap) { nm.metalnessMap = m.specularMap; nm.metalness = 0.3; }
-          nm.needsUpdate = true; m.dispose(); return nm;
-        });
-        child.material = fixedMats.length === 1 ? fixedMats[0] : fixedMats;
-      }
-    });
-
-    model.name = 'sceneModel'; sceneManager.getScene().add(model); currentSceneModel = model;
-    const sd = dataStore.getCurrentSceneData();
-    if (sd) sd.modelBounds = { sizeX: size.x, sizeY: size.y, sizeZ: size.z };
-    const finalBox = new THREE.Box3().setFromObject(model);
-    clipModelMinY = finalBox.min.y; clipModelMaxY = finalBox.max.y;
-    clipHeight = clipModelMaxY + 1; clipPlane.constant = clipHeight; updateClipSliderRange();
-    const footW = Math.max(size.x * 1.3, 20), footH = Math.max(size.z * 1.3, 20);
-    sceneManager.createGround(footW, footH);
-    const dirLight = sceneManager.getScene().getObjectByName('dirLight');
-    if (dirLight) {
-      const maxExt = Math.max(footW, footH) * 0.6;
-      dirLight.shadow.camera.left = -maxExt; dirLight.shadow.camera.right = maxExt;
-      dirLight.shadow.camera.top = maxExt; dirLight.shadow.camera.bottom = -maxExt;
-      dirLight.shadow.camera.far = size.y * 3 + 100; dirLight.shadow.camera.updateProjectionMatrix();
-    }
-    const diagSize = Math.sqrt(footW * footW + footH * footH);
-    sceneManager.getCamera().position.set(0, diagSize * 0.7, diagSize * 0.5);
-    sceneManager.getCamera().lookAt(0, size.y * 0.3, 0);
-    sceneManager.getControls().target.set(0, size.y * 0.3, 0); sceneManager.getControls().update();
-    showToast(`✅ 模型已加载: ${modelInfo.fileName}`);
-    renderSceneSelector();
-    if (callback) callback();
-  };
-
-  const onError = (err) => { console.error('Model load error:', err); showToast('❌ 模型加载失败'); if (callback) callback(); };
-  const onProgress = (xhr) => { if (xhr.total > 0) showToast(`⏳ 加载模型... ${Math.round(xhr.loaded / xhr.total * 100)}%`); };
-
-  if (modelInfo.type === 'glb' || modelInfo.type === 'gltf') gltfLoader.load(modelInfo.dataUrl, onLoaded, onProgress, onError);
-  else fbxLoader.load(modelInfo.dataUrl, onLoaded, onProgress, onError);
-}
+// Model loading is now handled by modelManager
 
 // ─── ENVIRONMENT ────────────────────────────────────────────
 // ─── PHASES ─────────────────────────────────────────────────
@@ -920,7 +845,7 @@ function loadPhaseState(phase) {
     }
     mesh.name = u.name;
     if (u.y !== undefined && u.y !== 0) mesh.position.y = u.y;
-    else mesh.position.y = getModelSurfaceHeight(u.x, u.z);
+    else mesh.position.y = modelManager.getModelSurfaceHeight(u.x, u.z);
     if (u.rx !== undefined) mesh.rotation.x = u.rx;
     if (u.ry !== undefined) mesh.rotation.y = u.ry;
     if (u.rz !== undefined) mesh.rotation.z = u.rz;
@@ -1006,9 +931,13 @@ function importSceneData(sceneId, data) {
 }
 
 function applySceneModel(sd, onReady) {
-  if (currentSceneModel) { sceneManager.getScene().remove(currentSceneModel); currentSceneModel = null; }
+  const currentModel = modelManager.getCurrentModel();
+  if (currentModel) { sceneManager.getScene().remove(currentModel); }
   if (sd.model) {
-    loadModelIntoScene(sd.model, () => {
+    modelManager.loadModelIntoScene(sd.model, () => {
+      clipHeight = modelManager.clipModelMaxY + 1;
+      clipPlane.constant = clipHeight;
+      updateClipSliderRange();
       if (onReady) onReady();
     });
   } else {
@@ -1051,7 +980,7 @@ function animatePhaseTransition(oldP, newP, callback) {
   if (newP.units) newP.units.forEach(nu => {
     const existing = unitMeshes.find(m => m.name === nu.name);
     if (existing) {
-      const toY = nu.y !== undefined ? nu.y : getModelSurfaceHeight(nu.x, nu.z);
+      const toY = nu.y !== undefined ? nu.y : modelManager.getModelSurfaceHeight(nu.x, nu.z);
       pairs.push({ mesh: existing, from: { x: existing.position.x, y: existing.position.y, z: existing.position.z }, to: { x: nu.x, y: toY, z: nu.z } });
     }
   });
@@ -1068,7 +997,7 @@ function animatePhaseTransition(oldP, newP, callback) {
       p.mesh.position.x = p.from.x + (p.to.x - p.from.x) * ease;
       p.mesh.position.z = p.from.z + (p.to.z - p.from.z) * ease;
       const baseY = p.from.y + (p.to.y - p.from.y) * ease;
-      const midY = getModelSurfaceHeight(p.mesh.position.x, p.mesh.position.z);
+      const midY = modelManager.getModelSurfaceHeight(p.mesh.position.x, p.mesh.position.z);
       p.mesh.position.y = Math.max(baseY, midY) + Math.sin(ease * Math.PI) * 2.0;
       // 同步更新精灵位置
       const sprite = unitLabelSprites.find(s => s.userData.parentUnit === p.mesh);
@@ -1087,7 +1016,7 @@ function animatePhaseTransition(oldP, newP, callback) {
       });
       toAdd.forEach(nu => {
         const m = createUnitMesh(nu.type, nu.x, nu.z, nu.label, nu.unitScale);
-        m.position.y = nu.y !== undefined ? nu.y : getModelSurfaceHeight(nu.x, nu.z);
+        m.position.y = nu.y !== undefined ? nu.y : modelManager.getModelSurfaceHeight(nu.x, nu.z);
         if (nu.rx !== undefined) m.rotation.x = nu.rx;
         if (nu.ry !== undefined) m.rotation.y = nu.ry;
         if (nu.rz !== undefined) m.rotation.z = nu.rz;
@@ -1155,8 +1084,9 @@ async function handleSingleModelUpload(file) {
 // ─── CLIP PLANE ─────────────────────────────────────────────
 function setClipEnabled(enabled) {
   clipEnabled = enabled;
-  if (currentSceneModel) {
-    currentSceneModel.traverse(child => {
+  const currentModel = modelManager.getCurrentModel();
+  if (currentModel) {
+    currentModel.traverse(child => {
       if (child.isMesh) {
         const mats = Array.isArray(child.material) ? child.material : [child.material];
         mats.forEach(m => { m.clippingPlanes = enabled ? [clipPlane] : []; m.clipShadows = enabled; m.needsUpdate = true; });
@@ -1198,11 +1128,11 @@ function createClipPlaneVisual() {
 
 function updateClipSliderRange() {
   const slider = document.getElementById('clipHeightSlider'); if (!slider) return;
-  const margin = (clipModelMaxY - clipModelMinY) * 0.05;
-  slider.min = clipModelMinY; slider.max = clipModelMaxY + margin;
-  slider.step = ((clipModelMaxY - clipModelMinY) / 200).toFixed(3); slider.value = clipHeight;
+  const margin = (modelManager.clipModelMaxY - modelManager.clipModelMinY) * 0.05;
+  slider.min = modelManager.clipModelMinY; slider.max = modelManager.clipModelMaxY + margin;
+  slider.step = ((modelManager.clipModelMaxY - modelManager.clipModelMinY) / 200).toFixed(3); slider.value = clipHeight;
   const valEl = document.getElementById('clipHeightValue'); if (valEl) valEl.textContent = clipHeight.toFixed(1);
-  const rangeEl = document.getElementById('clipRangeInfo'); if (rangeEl) rangeEl.textContent = `${clipModelMinY.toFixed(1)} ~ ${clipModelMaxY.toFixed(1)}`;
+  const rangeEl = document.getElementById('clipRangeInfo'); if (rangeEl) rangeEl.textContent = `${modelManager.clipModelMinY.toFixed(1)} ~ ${modelManager.clipModelMaxY.toFixed(1)}`;
 }
 
 function setBrightness(val) {
@@ -1211,25 +1141,16 @@ function setBrightness(val) {
 }
 
 // ─── RAYCASTING ─────────────────────────────────────────────
-function getModelSurfaceHeight(x, z) {
-  if (!currentSceneModel) return 0.5;
-  const meshes = []; currentSceneModel.traverse(c => { if (c.isMesh) meshes.push(c); });
-  const ray = new THREE.Raycaster(new THREE.Vector3(x, clipModelMaxY + 50, z), new THREE.Vector3(0, -1, 0), 0, clipModelMaxY + 100);
-  const hits = ray.intersectObjects(meshes, false);
-  if (hits.length > 0) return hits[0].point.y;
-  const ray2 = new THREE.Raycaster(new THREE.Vector3(x, clipModelMinY - 10, z), new THREE.Vector3(0, 1, 0), 0, clipModelMaxY + 50);
-  const hits2 = ray2.intersectObjects(meshes, false);
-  if (hits2.length > 0) return hits2[0].point.y;
-  return 0.5;
-}
+// getModelSurfaceHeight is now handled by modelManager
 
 function getSceneIntersect(event) {
   const rect = sceneManager.getRenderer().domElement.getBoundingClientRect();
   mouse.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
   mouse.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
   raycaster.setFromCamera(mouse, sceneManager.getCamera());
-  if (currentSceneModel) {
-    const meshes = []; currentSceneModel.traverse(c => { if (c.isMesh) meshes.push(c); });
+  const model = modelManager.getCurrentModel();
+  if (model) {
+    const meshes = []; model.traverse(c => { if (c.isMesh) meshes.push(c); });
     const hits = raycaster.intersectObjects(meshes, false);
     if (hits.length > 0) return hits[0].point.clone();
   }
@@ -1368,11 +1289,11 @@ function onCanvasMouseMove(e) {
       dragTarget.position.z = Math.max(-halfH, Math.min(halfH, point.z));
       // 如果物体当前在模型内部，使用交点Y；否则吸附到表面
       const currentY = dragTarget.position.y;
-      const isInsideModel = currentY > clipModelMinY && currentY < clipModelMaxY;
+      const isInsideModel = currentY > modelManager.clipModelMinY && currentY < modelManager.clipModelMaxY;
       if (isInsideModel) {
         dragTarget.position.y = point.y;
       } else {
-        dragTarget.position.y = getModelSurfaceHeight(dragTarget.position.x, dragTarget.position.z);
+        dragTarget.position.y = modelManager.getModelSurfaceHeight(dragTarget.position.x, dragTarget.position.z);
       }
       // 同步更新精灵位置
       const sprite = unitLabelSprites.find(s => s.userData.parentUnit === dragTarget);
@@ -2022,9 +1943,9 @@ function buildUI() {
           </button>
           <div id="clipControls" class="nav-control-group" style="display:none; margin-left:4px;">
             <div class="nav-control-label">剖切高度 <span class="val" id="clipHeightValue">${clipHeight.toFixed(1)}</span></div>
-            <div class="nav-slider-row"><span class="sl">底</span><input type="range" id="clipHeightSlider" min="${clipModelMinY}" max="${clipModelMaxY}" step="0.5" value="${clipHeight}" /><span class="sl">顶</span></div>
+            <div class="nav-slider-row"><span class="sl">底</span><input type="range" id="clipHeightSlider" min="${modelManager.clipModelMinY}" max="${modelManager.clipModelMaxY}" step="0.5" value="${clipHeight}" /><span class="sl">顶</span></div>
             <div style="display:flex; align-items:center; justify-content:space-between; margin-top:3px;">
-              <span style="font-size:8px; color:#3b4050;">范围: <span id="clipRangeInfo">${clipModelMinY.toFixed(1)} ~ ${clipModelMaxY.toFixed(1)}</span></span>
+              <span style="font-size:8px; color:#3b4050;">范围: <span id="clipRangeInfo">${modelManager.clipModelMinY.toFixed(1)} ~ ${modelManager.clipModelMaxY.toFixed(1)}</span></span>
             </div>
             <div class="nav-presets">
               <button class="nav-preset-btn" id="clipQuarter">25%</button>
@@ -2347,10 +2268,10 @@ function wireUIEvents() {
     showToast(clipEnabled ? '✂️ 剖切面已启用' : '✂️ 剖切面已关闭');
   });
   document.getElementById('clipHeightSlider')?.addEventListener('input', (e) => setClipHeight(parseFloat(e.target.value)));
-  document.getElementById('clipQuarter')?.addEventListener('click', () => { const v = clipModelMinY + (clipModelMaxY - clipModelMinY) * 0.25; setClipHeight(v); document.getElementById('clipHeightSlider').value = v; });
-  document.getElementById('clipHalf')?.addEventListener('click', () => { const v = clipModelMinY + (clipModelMaxY - clipModelMinY) * 0.5; setClipHeight(v); document.getElementById('clipHeightSlider').value = v; });
-  document.getElementById('clipThreeQuarter')?.addEventListener('click', () => { const v = clipModelMinY + (clipModelMaxY - clipModelMinY) * 0.75; setClipHeight(v); document.getElementById('clipHeightSlider').value = v; });
-  document.getElementById('clipFull')?.addEventListener('click', () => { const v = clipModelMaxY + 1; setClipHeight(v); document.getElementById('clipHeightSlider').value = v; });
+  document.getElementById('clipQuarter')?.addEventListener('click', () => { const v = modelManager.clipModelMinY + (modelManager.clipModelMaxY - modelManager.clipModelMinY) * 0.25; setClipHeight(v); document.getElementById('clipHeightSlider').value = v; });
+  document.getElementById('clipHalf')?.addEventListener('click', () => { const v = modelManager.clipModelMinY + (modelManager.clipModelMaxY - modelManager.clipModelMinY) * 0.5; setClipHeight(v); document.getElementById('clipHeightSlider').value = v; });
+  document.getElementById('clipThreeQuarter')?.addEventListener('click', () => { const v = modelManager.clipModelMinY + (modelManager.clipModelMaxY - modelManager.clipModelMinY) * 0.75; setClipHeight(v); document.getElementById('clipHeightSlider').value = v; });
+  document.getElementById('clipFull')?.addEventListener('click', () => { const v = modelManager.clipModelMaxY + 1; setClipHeight(v); document.getElementById('clipHeightSlider').value = v; });
 
   // ─── Viewpoint management ───
   document.getElementById('saveViewpointBtn')?.addEventListener('click', () => {
