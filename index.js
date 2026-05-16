@@ -1,5 +1,4 @@
 import * as THREE from 'three';
-import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { FBXLoader } from 'three/addons/loaders/FBXLoader.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { DRACOLoader } from 'three/addons/loaders/DRACOLoader.js';
@@ -8,6 +7,7 @@ import naxx01Glb from './src/map/naxx-01.glb?url';
 import naxx02Glb from './src/map/naxx-02.glb?url';
 import { UNIT_CATEGORIES, CUSTOM_ITEM_DEFS, DEFAULT_GROUND_WIDTH, DEFAULT_GROUND_HEIGHT } from './src/Constants.js';
 import { DataStore } from './src/DataStore.js';
+import { SceneManager } from './src/SceneManager.js';
 
 // ============================================================
 //  WoW-Style 3D Raid Tactics Planner
@@ -24,16 +24,14 @@ function downloadJson(data, filename) {
 }
 
 // ─── GLOBALS ────────────────────────────────────────────────
-let scene, camera, renderer, controls, raycaster, mouse, clock;
-let groundPlane, gridHelper, borderLines;
+let raycaster, mouse;
 let arrowStart = null;
 let animating = false;
 let isDragging = false;
 let dragTarget = null;
-let brightness = 1.2;
 
-let groundWidth = DEFAULT_GROUND_WIDTH;
-let groundHeight = DEFAULT_GROUND_HEIGHT;
+// ─── SCENE MANAGER ──────────────────────────────────────────
+const sceneManager = new SceneManager();
 
 // ─── CLIPPING PLANE STATE ──────────────────────────────────
 let clipEnabled = false;
@@ -43,12 +41,6 @@ let clipPlaneHelper = null;
 let clipModelMinY = 0;
 let clipModelMaxY = 100;
 
-// ─── FREE ROAM STATE ───────────────────────────────────────
-let freeRoamMode = false;
-let freeRoamSpeed = 5;
-let freeRoamEuler = new THREE.Euler(0, 0, 0, 'YXZ');
-let isPointerLocked = false;
-const keys = { w: false, a: false, s: false, d: false, q: false, e: false, shift: false };
 
 const unitMeshes = [];
 const unitLabelSprites = [];
@@ -73,18 +65,18 @@ function getCurrentViewpointGroups() {
 
 function getCurrentCameraState() {
   return {
-    pos: { x: camera.position.x, y: camera.position.y, z: camera.position.z },
-    target: { x: controls.target.x, y: controls.target.y, z: controls.target.z },
-    quaternion: { x: camera.quaternion.x, y: camera.quaternion.y, z: camera.quaternion.z, w: camera.quaternion.w }
+    pos: { x: sceneManager.getCamera().position.x, y: sceneManager.getCamera().position.y, z: sceneManager.getCamera().position.z },
+    target: { x: sceneManager.getControls().target.x, y: sceneManager.getControls().target.y, z: sceneManager.getControls().target.z },
+    quaternion: { x: sceneManager.getCamera().quaternion.x, y: sceneManager.getCamera().quaternion.y, z: sceneManager.getCamera().quaternion.z, w: sceneManager.getCamera().quaternion.w }
   };
 }
 
 function jumpToViewpoint(vp) {
-  if (freeRoamMode) toggleFreeRoamMode();
-  camera.position.set(vp.pos.x, vp.pos.y, vp.pos.z);
-  controls.target.set(vp.target.x, vp.target.y, vp.target.z);
-  if (vp.quaternion) camera.quaternion.set(vp.quaternion.x, vp.quaternion.y, vp.quaternion.z, vp.quaternion.w);
-  controls.update();
+  if (sceneManager.freeRoamMode) toggleFreeRoamMode();
+  sceneManager.getCamera().position.set(vp.pos.x, vp.pos.y, vp.pos.z);
+  sceneManager.getControls().target.set(vp.target.x, vp.target.y, vp.target.z);
+  if (vp.quaternion) sceneManager.getCamera().quaternion.set(vp.quaternion.x, vp.quaternion.y, vp.quaternion.z, vp.quaternion.w);
+  sceneManager.getControls().update();
   showToast(`📷 ${vp.name}`);
 }
 
@@ -158,63 +150,22 @@ const tgaLoader = new TGALoader();
 
 // ─── INIT ───────────────────────────────────────────────────
 function init() {
-  clock = new THREE.Clock();
-  scene = new THREE.Scene();
-  scene.background = new THREE.Color(0x0a0e17);
-  scene.fog = new THREE.FogExp2(0x0a0e17, 0.001);
+  sceneManager.init();
 
-  camera = new THREE.PerspectiveCamera(50, window.innerWidth / window.innerHeight, 0.1, 2000);
-  camera.position.set(0, 80, 60);
-  camera.lookAt(0, 0, 0);
-
-  renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
-  renderer.setSize(window.innerWidth, window.innerHeight);
-  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
-  renderer.shadowMap.enabled = true;
-  renderer.shadowMap.type = THREE.PCFSoftShadowMap;
-  renderer.toneMapping = THREE.LinearToneMapping;
-  renderer.toneMappingExposure = brightness;
-  renderer.outputColorSpace = THREE.SRGBColorSpace;
-  renderer.localClippingEnabled = true;
-  const root = document.getElementById('root') ?? document.body;
-  root.appendChild(renderer.domElement);
-
-  controls = new OrbitControls(camera, renderer.domElement);
-  controls.enableDamping = true; controls.dampingFactor = 0.08;
-  controls.maxPolarAngle = Math.PI / 2.05;
-  controls.minDistance = 5; controls.maxDistance = 500;
-  controls.target.set(0, 0, 0);
-
-  renderer.domElement.addEventListener('click', () => {
-    if (freeRoamMode && !isPointerLocked) renderer.domElement.requestPointerLock();
-  });
-  document.addEventListener('pointerlockchange', () => {
-    isPointerLocked = document.pointerLockElement === renderer.domElement;
-    if (!isPointerLocked && freeRoamMode) showToast('🖱️ 点击场景重新锁定视角');
-  });
-  document.addEventListener('mousemove', (e) => {
-    if (!freeRoamMode || !isPointerLocked) return;
-    const sensitivity = 0.002;
-    freeRoamEuler.setFromQuaternion(camera.quaternion);
-    freeRoamEuler.y -= e.movementX * sensitivity;
-    freeRoamEuler.x -= e.movementY * sensitivity;
-    freeRoamEuler.x = Math.max(-Math.PI / 2 + 0.01, Math.min(Math.PI / 2 - 0.01, freeRoamEuler.x));
-    camera.quaternion.setFromEuler(freeRoamEuler);
-  });
+  document.addEventListener('mousemove', (e) => sceneManager.handleMouseMoveForFreeRoam(e));
 
   raycaster = new THREE.Raycaster();
   mouse = new THREE.Vector2();
 
-  createLighting();
-  createGround(60, 60);
-  createEnvironmentDecor();
   buildUI();
   bindEvents();
 
   const sd = dataStore.getCurrentSceneData();
   if (sd.model) loadModelIntoScene(sd.model);
 
-  renderer.setAnimationLoop(animate);
+  sceneManager.getRenderer().setAnimationLoop(() => {
+    sceneManager.animate(unitMeshes, annotationMeshes, dataStore.selectedUnit);
+  });
 
   // 加载自定义物品
   loadCustomItems().then(() => {
@@ -222,53 +173,11 @@ function init() {
   });
 }
 
-// ─── LIGHTING ───────────────────────────────────────────────
-function createLighting() {
-  const ambient = new THREE.AmbientLight(0xffffff, 2.0); ambient.name = 'ambientLight'; scene.add(ambient);
-  const dirLight = new THREE.DirectionalLight(0xfff5e6, 3.0); dirLight.name = 'dirLight';
-  dirLight.position.set(40, 80, 40); dirLight.castShadow = true;
-  dirLight.shadow.mapSize.set(2048, 2048);
-  dirLight.shadow.camera.left = -80; dirLight.shadow.camera.right = 80;
-  dirLight.shadow.camera.top = 80; dirLight.shadow.camera.bottom = -80;
-  dirLight.shadow.camera.near = 1; dirLight.shadow.camera.far = 300;
-  dirLight.shadow.bias = -0.0005; dirLight.shadow.normalBias = 0.04;
-  scene.add(dirLight);
-  const d2 = new THREE.DirectionalLight(0xaaccff, 1.5); d2.name = 'dirLight2'; d2.position.set(-30, 50, -30); scene.add(d2);
-  const d3 = new THREE.DirectionalLight(0x8899bb, 0.8); d3.name = 'dirLight3'; d3.position.set(0, -20, 0); scene.add(d3);
-  const hemi = new THREE.HemisphereLight(0xddeeff, 0x667788, 1.8); hemi.name = 'hemiLight'; scene.add(hemi);
-  [[-40, 25, -40, 0xccaaff], [40, 25, 40, 0xaaccff], [40, 25, -40, 0xffeedd], [-40, 25, 40, 0xddffee]].forEach(([x, y, z, c], i) => {
-    const pl = new THREE.PointLight(c, 1.1, 200); pl.name = `fillLight${i + 1}`; pl.position.set(x, y, z); scene.add(pl);
-  });
-}
-
-// ─── GROUND ─────────────────────────────────────────────────
-function createGround(w, h) {
-  if (groundPlane) scene.remove(groundPlane);
-  if (gridHelper) scene.remove(gridHelper);
-  if (borderLines) scene.remove(borderLines);
-  groundWidth = w; groundHeight = h;
-
-  const geo = new THREE.PlaneGeometry(w, h, 1, 1);
-  const mat = new THREE.MeshStandardMaterial({ color: 0x3a4060, roughness: 0.8, metalness: 0, transparent: true, opacity: 0.08 });
-  groundPlane = new THREE.Mesh(geo, mat); groundPlane.name = 'groundPlane';
-  groundPlane.rotation.x = -Math.PI / 2; groundPlane.receiveShadow = true; scene.add(groundPlane);
-
-  const gridDiv = Math.max(Math.round(Math.max(w, h) / 2), 10);
-  const gridSize = Math.max(w, h);
-  gridHelper = new THREE.GridHelper(gridSize, gridDiv, 0x4a5080, 0x2a3050);
-  gridHelper.name = 'gridHelper'; gridHelper.position.y = 0.02;
-  gridHelper.material.opacity = 0.2; gridHelper.material.transparent = true; scene.add(gridHelper);
-
-  const bGeo = new THREE.EdgesGeometry(new THREE.PlaneGeometry(w, h));
-  const bMat = new THREE.LineBasicMaterial({ color: 0x6633cc, transparent: true, opacity: 0.4 });
-  borderLines = new THREE.LineSegments(bGeo, bMat); borderLines.name = 'borderLines';
-  borderLines.rotation.x = -Math.PI / 2; borderLines.position.y = 0.04; scene.add(borderLines);
-}
 
 // ─── MODEL LOADING ──────────────────────────────────────────
 function loadModelIntoScene(modelInfo, callback) {
   if (!modelInfo || !modelInfo.dataUrl) { if (callback) callback(); return; }
-  if (currentSceneModel) { scene.remove(currentSceneModel); currentSceneModel = null; }
+  if (currentSceneModel) { sceneManager.getScene().remove(currentSceneModel); currentSceneModel = null; }
   showToast('⏳ 正在加载3D模型...');
 
   const onLoaded = (object) => {
@@ -308,15 +217,15 @@ function loadModelIntoScene(modelInfo, callback) {
       }
     });
 
-    model.name = 'sceneModel'; scene.add(model); currentSceneModel = model;
+    model.name = 'sceneModel'; sceneManager.getScene().add(model); currentSceneModel = model;
     const sd = dataStore.getCurrentSceneData();
     if (sd) sd.modelBounds = { sizeX: size.x, sizeY: size.y, sizeZ: size.z };
     const finalBox = new THREE.Box3().setFromObject(model);
     clipModelMinY = finalBox.min.y; clipModelMaxY = finalBox.max.y;
     clipHeight = clipModelMaxY + 1; clipPlane.constant = clipHeight; updateClipSliderRange();
     const footW = Math.max(size.x * 1.3, 20), footH = Math.max(size.z * 1.3, 20);
-    createGround(footW, footH);
-    const dirLight = scene.getObjectByName('dirLight');
+    sceneManager.createGround(footW, footH);
+    const dirLight = sceneManager.getScene().getObjectByName('dirLight');
     if (dirLight) {
       const maxExt = Math.max(footW, footH) * 0.6;
       dirLight.shadow.camera.left = -maxExt; dirLight.shadow.camera.right = maxExt;
@@ -324,9 +233,9 @@ function loadModelIntoScene(modelInfo, callback) {
       dirLight.shadow.camera.far = size.y * 3 + 100; dirLight.shadow.camera.updateProjectionMatrix();
     }
     const diagSize = Math.sqrt(footW * footW + footH * footH);
-    camera.position.set(0, diagSize * 0.7, diagSize * 0.5);
-    camera.lookAt(0, size.y * 0.3, 0);
-    controls.target.set(0, size.y * 0.3, 0); controls.update();
+    sceneManager.getCamera().position.set(0, diagSize * 0.7, diagSize * 0.5);
+    sceneManager.getCamera().lookAt(0, size.y * 0.3, 0);
+    sceneManager.getControls().target.set(0, size.y * 0.3, 0); sceneManager.getControls().update();
     showToast(`✅ 模型已加载: ${modelInfo.fileName}`);
     renderSceneSelector();
     if (callback) callback();
@@ -340,20 +249,6 @@ function loadModelIntoScene(modelInfo, callback) {
 }
 
 // ─── ENVIRONMENT ────────────────────────────────────────────
-function createEnvironmentDecor() {
-  const pc = 150, geo = new THREE.BufferGeometry();
-  const pos = new Float32Array(pc * 3), col = new Float32Array(pc * 3);
-  for (let i = 0; i < pc; i++) {
-    pos[i * 3] = (Math.random() - 0.5) * 120; pos[i * 3 + 1] = Math.random() * 40 + 5; pos[i * 3 + 2] = (Math.random() - 0.5) * 120;
-    const c = new THREE.Color().setHSL(0.7 + Math.random() * 0.15, 0.8, 0.6);
-    col[i * 3] = c.r; col[i * 3 + 1] = c.g; col[i * 3 + 2] = c.b;
-  }
-  geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
-  geo.setAttribute('color', new THREE.BufferAttribute(col, 3));
-  const mat = new THREE.PointsMaterial({ size: 0.15, vertexColors: true, transparent: true, opacity: 0.4, sizeAttenuation: true });
-  const p = new THREE.Points(geo, mat); p.name = 'runeParticles'; scene.add(p);
-}
-
 // ─── PHASES ─────────────────────────────────────────────────
 
 // ════════════════════════════════════════════════════════════
@@ -708,7 +603,7 @@ function createUnitMesh(type, x, z, label, unitScale) {
   const s = unitScale !== undefined ? unitScale : 0.1;
   group.scale.set(s, s, s);
   group.userData = { type, label: label || def.label, role: type, isUnit: true, unitScale: s, isMonster };
-  scene.add(group);
+  sceneManager.getScene().add(group);
   unitMeshes.push(group);
 
   // Label sprite - 作为独立对象添加到场景
@@ -718,7 +613,7 @@ function createUnitMesh(type, x, z, label, unitScale) {
   sprite.position.set(x, group.position.y + spriteOffsetY, z);
   sprite.userData.parentUnit = group;
   sprite.userData.offsetY = spriteOffsetY;
-  scene.add(sprite);
+  sceneManager.getScene().add(sprite);
   unitLabelSprites.push(sprite);
 
   return group;
@@ -782,7 +677,7 @@ function createCustomMesh(type, x, z, label, unitScale) {
     isMonster: false
   };
 
-  scene.add(mesh);
+  sceneManager.getScene().add(mesh);
   unitMeshes.push(mesh);
 
   // Label sprite - 作为独立对象添加到场景
@@ -791,7 +686,7 @@ function createCustomMesh(type, x, z, label, unitScale) {
   sprite.position.set(x, mesh.position.y + spriteOffsetY, z);
   sprite.userData.parentUnit = mesh;
   sprite.userData.offsetY = spriteOffsetY;
-  scene.add(sprite);
+  sceneManager.getScene().add(sprite);
   unitLabelSprites.push(sprite);
 
   return mesh;
@@ -970,7 +865,7 @@ function createArrowAnnotation(start, end, color) {
 
   group.userData = { isAnnotation: true, annotationType: 'arrow', start: start.clone(), end: end.clone(), color: arrowColor };
   group.position.y -= 0.2;  // Y轴高度下降0.2
-  scene.add(group); annotationMeshes.push(group); return group;
+  sceneManager.getScene().add(group); annotationMeshes.push(group); return group;
 }
 
 function createZoneAnnotation(center, radius, color, label) {
@@ -987,7 +882,7 @@ function createZoneAnnotation(center, radius, color, label) {
   const pulse = new THREE.Mesh(pulseGeo, pulseMat); pulse.rotation.x = -Math.PI / 2; pulse.position.set(center.x, center.y + 0.09, center.z); pulse.userData.pulse = true; group.add(pulse);
   if (label) { const sprite = createTextSprite(label, c); sprite.position.set(center.x, center.y + 0.3, center.z); sprite.scale.set(0.6, 0.15, 1); group.add(sprite); }
   group.userData = { isAnnotation: true, annotationType: 'zone', center: center.clone(), radius, color: c, label };
-  scene.add(group); annotationMeshes.push(group); return group;
+  sceneManager.getScene().add(group); annotationMeshes.push(group); return group;
 }
 
 function createLabelAnnotation(position, text) {
@@ -1000,7 +895,7 @@ function createLabelAnnotation(position, text) {
   const dot = new THREE.Mesh(new THREE.SphereGeometry(0.024, 8, 8), new THREE.MeshBasicMaterial({ color: 0xfbbf24 }));
   dot.position.set(position.x, position.y + 0.01, position.z); group.add(dot);
   group.userData = { isAnnotation: true, annotationType: 'label', text, pos: position.clone() };
-  scene.add(group); annotationMeshes.push(group); return group;
+  sceneManager.getScene().add(group); annotationMeshes.push(group); return group;
 }
 
 // ─── SAVE / LOAD ────────────────────────────────────────────
@@ -1009,9 +904,9 @@ function saveCurrentState() {
 }
 
 function clearSceneObjects() {
-  unitMeshes.forEach(m => scene.remove(m)); unitMeshes.length = 0;
-  unitLabelSprites.forEach(s => scene.remove(s)); unitLabelSprites.length = 0;
-  annotationMeshes.forEach(a => scene.remove(a)); annotationMeshes.length = 0;
+  unitMeshes.forEach(m => sceneManager.getScene().remove(m)); unitMeshes.length = 0;
+  unitLabelSprites.forEach(s => sceneManager.getScene().remove(s)); unitLabelSprites.length = 0;
+  annotationMeshes.forEach(a => sceneManager.getScene().remove(a)); annotationMeshes.length = 0;
 }
 
 function loadPhaseState(phase) {
@@ -1111,13 +1006,13 @@ function importSceneData(sceneId, data) {
 }
 
 function applySceneModel(sd, onReady) {
-  if (currentSceneModel) { scene.remove(currentSceneModel); currentSceneModel = null; }
+  if (currentSceneModel) { sceneManager.getScene().remove(currentSceneModel); currentSceneModel = null; }
   if (sd.model) {
     loadModelIntoScene(sd.model, () => {
       if (onReady) onReady();
     });
   } else {
-    createGround(60, 60); camera.position.set(0, 80, 60); camera.lookAt(0, 0, 0); controls.target.set(0, 0, 0); controls.update();
+    sceneManager.createGround(60, 60); sceneManager.getCamera().position.set(0, 80, 60); sceneManager.getCamera().lookAt(0, 0, 0); sceneManager.getControls().target.set(0, 0, 0); sceneManager.getControls().update();
     if (onReady) onReady();
   }
 }
@@ -1166,7 +1061,7 @@ function animatePhaseTransition(oldP, newP, callback) {
   const toRemove = unitMeshes.filter(m => !newNames.includes(m.name));
 
   function frame() {
-    elapsed += clock.getDelta();
+    elapsed += sceneManager.getClock().getDelta();
     const t = Math.min(elapsed / duration, 1);
     const ease = t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
     pairs.forEach(p => {
@@ -1183,12 +1078,12 @@ function animatePhaseTransition(oldP, newP, callback) {
     });
     toRemove.forEach(m => m.scale.setScalar((1 - ease) * (m.userData.unitScale || 0.1)));
     pairs.forEach(p => { if (t > 0.05 && t < 0.95 && Math.random() < 0.3) createTrailParticle(p.mesh.position); });
-    controls.update(); renderer.render(scene, camera);
+    sceneManager.getControls().update(); sceneManager.getRenderer().render(sceneManager.getScene(), sceneManager.getCamera());
     if (t >= 1) {
       toRemove.forEach(m => {
-        scene.remove(m); const idx = unitMeshes.indexOf(m); if (idx > -1) unitMeshes.splice(idx, 1);
+        sceneManager.getScene().remove(m); const idx = unitMeshes.indexOf(m); if (idx > -1) unitMeshes.splice(idx, 1);
         const spriteIdx = unitLabelSprites.findIndex(s => s.userData.parentUnit === m);
-        if (spriteIdx > -1) { scene.remove(unitLabelSprites[spriteIdx]); unitLabelSprites.splice(spriteIdx, 1); }
+        if (spriteIdx > -1) { sceneManager.getScene().remove(unitLabelSprites[spriteIdx]); unitLabelSprites.splice(spriteIdx, 1); }
       });
       toAdd.forEach(nu => {
         const m = createUnitMesh(nu.type, nu.x, nu.z, nu.label, nu.unitScale);
@@ -1209,24 +1104,24 @@ function animatePhaseTransition(oldP, newP, callback) {
           sprite.position.set(p.to.x, p.to.y + sprite.userData.offsetY, p.to.z);
         }
       });
-      annotationMeshes.forEach(a => scene.remove(a)); annotationMeshes.length = 0;
+      annotationMeshes.forEach(a => sceneManager.getScene().remove(a)); annotationMeshes.length = 0;
       if (newP.annotations) newP.annotations.forEach(a => {
         if (a.type === 'arrow' && a.start && a.end) createArrowAnnotation(new THREE.Vector3(a.start.x, a.start.y || 0, a.start.z), new THREE.Vector3(a.end.x, a.end.y || 0, a.end.z), a.color);
         else if (a.type === 'zone' && a.center) createZoneAnnotation(new THREE.Vector3(a.center.x, a.center.y || 0, a.center.z), a.radius, a.color, a.label);
         else if (a.type === 'label' && a.pos) createLabelAnnotation(new THREE.Vector3(a.pos.x, a.pos.y || 0, a.pos.z), a.text);
       });
-      animating = false; renderer.setAnimationLoop(animate);
+      animating = false; sceneManager.getRenderer().setAnimationLoop(() => sceneManager.animate(unitMeshes, annotationMeshes, dataStore.selectedUnit));
       if (callback) callback(); return;
     }
-    renderer.setAnimationLoop(frame);
+    sceneManager.getRenderer().setAnimationLoop(frame);
   }
-  renderer.setAnimationLoop(frame);
+  sceneManager.getRenderer().setAnimationLoop(frame);
 }
 
 function createTrailParticle(pos) {
   const p = new THREE.Mesh(new THREE.SphereGeometry(0.08, 6, 6), new THREE.MeshBasicMaterial({ color: 0xa855f7, transparent: true, opacity: 0.6 }));
   p.position.copy(pos); p.position.x += (Math.random() - 0.5) * 0.3; p.position.z += (Math.random() - 0.5) * 0.3;
-  scene.add(p); setTimeout(() => scene.remove(p), 500);
+  sceneManager.getScene().add(p); setTimeout(() => sceneManager.getScene().remove(p), 500);
 }
 
 // ─── MODEL UPLOAD ───────────────────────────────────────────
@@ -1281,9 +1176,9 @@ function setClipHeight(val) {
 }
 
 function createClipPlaneVisual() {
-  if (clipPlaneHelper) scene.remove(clipPlaneHelper);
+  if (clipPlaneHelper) sceneManager.getScene().remove(clipPlaneHelper);
   const group = new THREE.Group(); group.name = 'clipPlaneHelper';
-  const s = Math.max(groundWidth, groundHeight) * 1.2;
+  const s = Math.max(sceneManager.groundWidth, sceneManager.groundHeight) * 1.2;
   const planeGeo = new THREE.PlaneGeometry(s, s);
   const planeMat = new THREE.MeshBasicMaterial({ color: 0xff4444, transparent: true, opacity: 0.06, side: THREE.DoubleSide, depthWrite: false });
   const mesh = new THREE.Mesh(planeGeo, planeMat); mesh.rotation.x = -Math.PI / 2; group.add(mesh);
@@ -1298,7 +1193,7 @@ function createClipPlaneVisual() {
     group.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(-half, 0, t * half), new THREE.Vector3(half, 0, t * half)]), lineMat));
   }
   group.position.y = clipHeight; group.visible = clipEnabled;
-  scene.add(group); clipPlaneHelper = group;
+  sceneManager.getScene().add(group); clipPlaneHelper = group;
 }
 
 function updateClipSliderRange() {
@@ -1311,13 +1206,7 @@ function updateClipSliderRange() {
 }
 
 function setBrightness(val) {
-  brightness = val; renderer.toneMappingExposure = val;
-  const amb = scene.getObjectByName('ambientLight'); if (amb) amb.intensity = 2 * val;
-  const d = scene.getObjectByName('dirLight'); if (d) d.intensity = 3 * val;
-  const d2 = scene.getObjectByName('dirLight2'); if (d2) d2.intensity = 1.5 * val;
-  const d3 = scene.getObjectByName('dirLight3'); if (d3) d3.intensity = 0.8 * val;
-  const h = scene.getObjectByName('hemiLight'); if (h) h.intensity = 1.8 * val;
-  for (let i = 1; i <= 4; i++) { const l = scene.getObjectByName(`fillLight${i}`); if (l) l.intensity = 1.1 * val; }
+  sceneManager.setBrightness(val);
   const el = document.getElementById('brightnessValue'); if (el) el.textContent = Math.round(val * 100) + '%';
 }
 
@@ -1335,16 +1224,16 @@ function getModelSurfaceHeight(x, z) {
 }
 
 function getSceneIntersect(event) {
-  const rect = renderer.domElement.getBoundingClientRect();
+  const rect = sceneManager.getRenderer().domElement.getBoundingClientRect();
   mouse.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
   mouse.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
-  raycaster.setFromCamera(mouse, camera);
+  raycaster.setFromCamera(mouse, sceneManager.getCamera());
   if (currentSceneModel) {
     const meshes = []; currentSceneModel.traverse(c => { if (c.isMesh) meshes.push(c); });
     const hits = raycaster.intersectObjects(meshes, false);
     if (hits.length > 0) return hits[0].point.clone();
   }
-  const planeHits = raycaster.intersectObject(groundPlane);
+  const planeHits = raycaster.intersectObject(sceneManager.groundPlane);
   if (planeHits.length > 0) {
     const pt = planeHits[0].point.clone();
     return pt;
@@ -1355,28 +1244,28 @@ function getSceneIntersect(event) {
 function getGroundIntersect(event) { return getSceneIntersect(event); }
 
 function getUnitIntersect(event) {
-  const rect = renderer.domElement.getBoundingClientRect();
+  const rect = sceneManager.getRenderer().domElement.getBoundingClientRect();
   mouse.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
   mouse.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
-  raycaster.setFromCamera(mouse, camera);
+  raycaster.setFromCamera(mouse, sceneManager.getCamera());
   const hits = raycaster.intersectObjects(unitMeshes, true);
   if (hits.length > 0) {
     let obj = hits[0].object;
-    while (obj && obj !== scene && !obj.userData.isUnit) obj = obj.parent;
+    while (obj && obj !== sceneManager.getScene() && !obj.userData.isUnit) obj = obj.parent;
     if (obj && obj.userData.isUnit) return obj;
   }
   return null;
 }
 
 function getAnnotationIntersect(event) {
-  const rect = renderer.domElement.getBoundingClientRect();
+  const rect = sceneManager.getRenderer().domElement.getBoundingClientRect();
   mouse.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
   mouse.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
-  raycaster.setFromCamera(mouse, camera);
+  raycaster.setFromCamera(mouse, sceneManager.getCamera());
   const hits = raycaster.intersectObjects(annotationMeshes, true);
   if (hits.length > 0) {
     let obj = hits[0].object;
-    while (obj && obj !== scene && !obj.userData.isAnnotation) obj = obj.parent;
+    while (obj && obj !== sceneManager.getScene() && !obj.userData.isAnnotation) obj = obj.parent;
     if (obj && obj.userData.isAnnotation) return obj;
   }
   return null;
@@ -1385,11 +1274,11 @@ function getAnnotationIntersect(event) {
 // ─── EVENTS ─────────────────────────────────────────────────
 
 function bindEvents() {
-  renderer.domElement.addEventListener('click', onCanvasClick);
-  renderer.domElement.addEventListener('mousemove', onCanvasMouseMove);
-  renderer.domElement.addEventListener('mousedown', onMouseDown);
-  renderer.domElement.addEventListener('mouseup', onMouseUp);
-  renderer.domElement.addEventListener('contextmenu', (e) => {
+  sceneManager.getRenderer().domElement.addEventListener('click', onCanvasClick);
+  sceneManager.getRenderer().domElement.addEventListener('mousemove', onCanvasMouseMove);
+  sceneManager.getRenderer().domElement.addEventListener('mousedown', onMouseDown);
+  sceneManager.getRenderer().domElement.addEventListener('mouseup', onMouseUp);
+  sceneManager.getRenderer().domElement.addEventListener('contextmenu', (e) => {
     e.preventDefault(); dataStore.selectedUnit = null; dataStore.selectedAnnotation = null; dataStore.placementMode = null; arrowStart = null;
     updateToolbarSelection(); clearSelectionVisuals(); clearAnnotationSelection(); hideAnnotationEditPanel();
   });
@@ -1405,10 +1294,10 @@ function bindEvents() {
 }
 
 function onCanvasClick(e) {
-  if (animating || freeRoamMode) return;
+  if (animating || sceneManager.freeRoamMode) return;
   const point = getGroundIntersect(e);
   if (!point) return;
-  const halfW = groundWidth / 2 - 1, halfH = groundHeight / 2 - 1;
+  const halfW = sceneManager.groundWidth / 2 - 1, halfH = sceneManager.groundHeight / 2 - 1;
   point.x = Math.max(-halfW, Math.min(halfW, point.x));
   point.z = Math.max(-halfH, Math.min(halfH, point.z));
 
@@ -1465,16 +1354,16 @@ function onCanvasClick(e) {
 function onMouseDown(e) {
   if (animating || dataStore.placementMode) return;
   const unit = getUnitIntersect(e);
-  if (unit) { isDragging = true; dragTarget = unit; controls.enabled = false; }
+  if (unit) { isDragging = true; dragTarget = unit; sceneManager.getControls().enabled = false; }
 }
-function onMouseUp() { if (isDragging) { isDragging = false; dragTarget = null; controls.enabled = true; } }
+function onMouseUp() { if (isDragging) { isDragging = false; dragTarget = null; sceneManager.getControls().enabled = true; } }
 
 function onCanvasMouseMove(e) {
   if (animating) return;
   if (isDragging && dragTarget) {
     const point = getGroundIntersect(e);
     if (point) {
-      const halfW = groundWidth / 2 - 1, halfH = groundHeight / 2 - 1;
+      const halfW = sceneManager.groundWidth / 2 - 1, halfH = sceneManager.groundHeight / 2 - 1;
       dragTarget.position.x = Math.max(-halfW, Math.min(halfW, point.x));
       dragTarget.position.z = Math.max(-halfH, Math.min(halfH, point.z));
       // 如果物体当前在模型内部，使用交点Y；否则吸附到表面
@@ -1513,7 +1402,7 @@ function onCanvasMouseMove(e) {
           c.material.emissiveIntensity = 0.6;
         }
       });
-      renderer.domElement.style.cursor = 'grab';
+      sceneManager.getRenderer().domElement.style.cursor = 'grab';
     }
   }
   if (annotation !== dataStore.hoveredAnnotation) {
@@ -1529,9 +1418,9 @@ function onCanvasMouseMove(e) {
           c.material.opacity = 1;
         }
       });
-      renderer.domElement.style.cursor = 'pointer';
+      sceneManager.getRenderer().domElement.style.cursor = 'pointer';
     } else if (!dataStore.hoveredUnit) {
-      renderer.domElement.style.cursor = dataStore.placementMode ? 'crosshair' : 'default';
+      sceneManager.getRenderer().domElement.style.cursor = dataStore.placementMode ? 'crosshair' : 'default';
     }
   }
 }
@@ -1539,33 +1428,33 @@ function onCanvasMouseMove(e) {
 function onKeyDown(e) {
   if (e.target.closest('input')) return;
   const key = e.key.toLowerCase();
-  if (key === 'w' || key === 'arrowup') keys.w = true;
-  if (key === 's' || key === 'arrowdown') keys.s = true;
-  if (key === 'a' || key === 'arrowleft') keys.a = true;
-  if (key === 'd' || key === 'arrowright') keys.d = true;
-  if (key === 'q') keys.q = true;
-  if (key === 'e') keys.e = true;
-  if (key === 'shift') keys.shift = true;
+  if (key === 'w' || key === 'arrowup') sceneManager.keys.w = true;
+  if (key === 's' || key === 'arrowdown') sceneManager.keys.s = true;
+  if (key === 'a' || key === 'arrowleft') sceneManager.keys.a = true;
+  if (key === 'd' || key === 'arrowright') sceneManager.keys.d = true;
+  if (key === 'q') sceneManager.keys.q = true;
+  if (key === 'e') sceneManager.keys.e = true;
+  if (key === 'shift') sceneManager.keys.shift = true;
   if (key === 'f') toggleFreeRoamMode();
   if (e.key === 'Delete' || e.key === 'Backspace') {
     if (dataStore.selectedAnnotation && !e.target.closest('input')) {
-      scene.remove(dataStore.selectedAnnotation); const idx = annotationMeshes.indexOf(dataStore.selectedAnnotation);
+      sceneManager.getScene().remove(dataStore.selectedAnnotation); const idx = annotationMeshes.indexOf(dataStore.selectedAnnotation);
       if (idx > -1) annotationMeshes.splice(idx, 1);
       dataStore.selectedAnnotation = null; showToast('🗑️ 标注已删除'); updateAnnotCount();
     } else if (dataStore.selectedUnit && !e.target.closest('input')) {
-      scene.remove(dataStore.selectedUnit); const idx = unitMeshes.indexOf(dataStore.selectedUnit);
+      sceneManager.getScene().remove(dataStore.selectedUnit); const idx = unitMeshes.indexOf(dataStore.selectedUnit);
       if (idx > -1) unitMeshes.splice(idx, 1);
       // 同时删除关联的精灵
       const spriteIdx = unitLabelSprites.findIndex(s => s.userData.parentUnit === dataStore.selectedUnit);
       if (spriteIdx > -1) {
-        scene.remove(unitLabelSprites[spriteIdx]);
+        sceneManager.getScene().remove(unitLabelSprites[spriteIdx]);
         unitLabelSprites.splice(spriteIdx, 1);
       }
       dataStore.selectedUnit = null; showToast('🗑️ 单位已删除'); updateUnitList(); updateTransformPanel();
     }
   }
   if (e.key === 'Escape') {
-    if (freeRoamMode && isPointerLocked) { document.exitPointerLock(); return; }
+    if (sceneManager.freeRoamMode && sceneManager.isPointerLocked) { document.exitPointerLock(); return; }
     dataStore.placementMode = null; arrowStart = null; dataStore.selectedUnit = null; dataStore.selectedAnnotation = null;
     clearSelectionVisuals(); clearAnnotationSelection(); updateToolbarSelection(); updateTransformPanel();
     hideAnnotationEditPanel();
@@ -1574,49 +1463,31 @@ function onKeyDown(e) {
 
 function onKeyUp(e) {
   const key = e.key.toLowerCase();
-  if (key === 'w' || key === 'arrowup') keys.w = false;
-  if (key === 's' || key === 'arrowdown') keys.s = false;
-  if (key === 'a' || key === 'arrowleft') keys.a = false;
-  if (key === 'd' || key === 'arrowright') keys.d = false;
-  if (key === 'q') keys.q = false;
-  if (key === 'e') keys.e = false;
-  if (key === 'shift') keys.shift = false;
-}
-
-function updateFreeRoamMovement(delta) {
-  if (!freeRoamMode) return;
-  const speed = freeRoamSpeed * (keys.shift ? 2.5 : 1.0) * delta;
-  const forward = new THREE.Vector3(); camera.getWorldDirection(forward); forward.normalize();
-  const right = new THREE.Vector3(); right.crossVectors(forward, camera.up).normalize();
-  const move = new THREE.Vector3(0, 0, 0);
-  if (keys.w) move.add(forward.clone().multiplyScalar(speed));
-  if (keys.s) move.add(forward.clone().multiplyScalar(-speed));
-  if (keys.a) move.add(right.clone().multiplyScalar(-speed));
-  if (keys.d) move.add(right.clone().multiplyScalar(speed));
-  if (keys.q) move.y -= speed;
-  if (keys.e) move.y += speed;
-  camera.position.add(move);
+  if (key === 'w' || key === 'arrowup') sceneManager.keys.w = false;
+  if (key === 's' || key === 'arrowdown') sceneManager.keys.s = false;
+  if (key === 'a' || key === 'arrowleft') sceneManager.keys.a = false;
+  if (key === 'd' || key === 'arrowright') sceneManager.keys.d = false;
+  if (key === 'q') sceneManager.keys.q = false;
+  if (key === 'e') sceneManager.keys.e = false;
+  if (key === 'shift') sceneManager.keys.shift = false;
 }
 
 function toggleFreeRoamMode() {
-  freeRoamMode = !freeRoamMode;
-  if (freeRoamMode) {
-    controls.enabled = false; freeRoamEuler.setFromQuaternion(camera.quaternion);
+  const activated = sceneManager.toggleFreeRoam();
+  if (activated) {
     showToast('🎮 漫游模式 — WS前后·AD左右 / QE升降 / Shift加速');
-    renderer.domElement.requestPointerLock(); setActiveTool('roam');
+    sceneManager.getRenderer().domElement.requestPointerLock(); setActiveTool('roam');
   } else {
-    controls.enabled = true; if (isPointerLocked) document.exitPointerLock();
-    const dir = new THREE.Vector3(); camera.getWorldDirection(dir);
-    controls.target.copy(camera.position).add(dir.multiplyScalar(20));
-    controls.update(); showToast('🖱️ 轨道视角模式'); setActiveTool(null);
+    const dir = new THREE.Vector3(); sceneManager.getCamera().getWorldDirection(dir);
+    sceneManager.getControls().target.copy(sceneManager.getCamera().position).add(dir.multiplyScalar(20));
+    sceneManager.getControls().update(); showToast('🖱️ 轨道视角模式'); setActiveTool(null);
   }
   const btn = document.getElementById('freeRoamBtn');
-  if (btn) btn.classList.toggle('active', freeRoamMode);
+  if (btn) btn.classList.toggle('active', sceneManager.freeRoamMode);
 }
 
 function onResize() {
-  camera.aspect = window.innerWidth / window.innerHeight;
-  camera.updateProjectionMatrix(); renderer.setSize(window.innerWidth, window.innerHeight);
+  sceneManager.onResize();
 }
 
 function addSelectionVisual(unit) {
@@ -1648,35 +1519,7 @@ function setActiveTool(toolId) {
   });
 }
 
-// ─── ANIMATION LOOP ────────────────────────────────────────
-function animate() {
-  const delta = clock.getDelta();
-  const t = clock.getElapsedTime();
-  updateFreeRoamMovement(delta);
-  unitMeshes.forEach((u, i) => {
-    // Idle bob
-    if (u !== dataStore.selectedUnit) {
-      const bob = Math.sin(t * 2 + i * 0.7) * 0.03;
-      u.children.forEach(c => { if (c.isMesh || c.isGroup) c.position.y += bob * 0.1; });
-    }
-    if (u === dataStore.selectedUnit) {
-      const pulse = 1 + Math.sin(t * 3) * 0.03;
-      const base = u.userData.unitScale || 0.1;
-      u.scale.set(base * pulse, base * pulse, base * pulse);
-    }
-  });
-  annotationMeshes.forEach(a => a.traverse(c => { if (c.userData?.pulse && c.material) c.material.opacity = 0.15 + Math.sin(t * 3) * 0.15; }));
-  const particles = scene.getObjectByName('runeParticles');
-  if (particles) {
-    particles.rotation.y = t * 0.015;
-    const pos = particles.geometry.attributes.position;
-    for (let i = 0; i < pos.count; i++) pos.array[i * 3 + 1] += Math.sin(t + i) * 0.001;
-    pos.needsUpdate = true;
-  }
-  unitMeshes.forEach(u => { const ring = u.getObjectByName('selectionRing'); if (ring) ring.rotation.z = t * 2; });
-  if (!freeRoamMode) controls.update();
-  renderer.render(scene, camera);
-}
+// Animation loop is now handled by sceneManager.animate() called in init()
 
 // ════════════════════════════════════════════════════════════
 //  UI
@@ -2154,8 +1997,8 @@ function buildUI() {
         </div>
         <div class="nav-section-body" data-section="view">
           <div class="nav-control-group">
-            <div class="nav-control-label">场景亮度 <span class="val" id="brightnessValue">${Math.round(brightness * 100)}%</span></div>
-            <div class="nav-slider-row"><span class="sl">🌙</span><input type="range" id="brightnessSlider" min="0.3" max="3.0" step="0.05" value="${brightness}" /><span class="sl">☀️</span></div>
+            <div class="nav-control-label">场景亮度 <span class="val" id="brightnessValue">${Math.round(sceneManager.brightness * 100)}%</span></div>
+            <div class="nav-slider-row"><span class="sl">🌙</span><input type="range" id="brightnessSlider" min="0.3" max="3.0" step="0.05" value="${sceneManager.brightness}" /><span class="sl">☀️</span></div>
           </div>
           <div class="nav-control-group">
             <div class="nav-control-label">快捷视角</div>
@@ -2170,8 +2013,8 @@ function buildUI() {
             <span class="t-icon">🚶</span><span class="t-label">漫游模式</span><span class="t-status" style="background:#475569;"></span>
           </button>
           <div id="roamSpeedControl" class="nav-control-group" style="margin-left:4px;">
-            <div class="nav-control-label">移动速度 <span class="val" id="roamSpeedValue">${freeRoamSpeed}</span></div>
-            <div class="nav-slider-row"><span class="sl">慢</span><input type="range" id="roamSpeedSlider" min="1" max="10" step="1" value="${freeRoamSpeed}" /><span class="sl">快</span></div>
+            <div class="nav-control-label">移动速度 <span class="val" id="roamSpeedValue">${sceneManager.freeRoamSpeed}</span></div>
+            <div class="nav-slider-row"><span class="sl">慢</span><input type="range" id="roamSpeedSlider" min="1" max="10" step="1" value="${sceneManager.freeRoamSpeed}" /><span class="sl">快</span></div>
           </div>
           <div class="nav-sep"></div>
           <button class="nav-tool-btn" id="clipToggleBtn" data-tool="clip">
@@ -2465,13 +2308,13 @@ function wireUIEvents() {
   });
 
   // ─── Brightness slider ───
-  document.getElementById('brightnessSlider')?.addEventListener('input', (e) => setBrightness(parseFloat(e.target.value)));
+  document.getElementById('brightnessSlider')?.addEventListener('input', (e) => sceneManager.setBrightness(parseFloat(e.target.value)));
 
   // ─── View presets ───
   document.querySelectorAll('[data-view]').forEach(btn => {
     btn.addEventListener('click', () => {
-      if (freeRoamMode) toggleFreeRoamMode();
-      const d = Math.max(groundWidth, groundHeight) * 0.8;
+      if (sceneManager.freeRoamMode) toggleFreeRoamMode();
+      const d = Math.max(sceneManager.groundWidth, sceneManager.groundHeight) * 0.8;
       const views = {
         top: { pos: [0, d, 0.01], target: [0, 0, 0] },
         front: { pos: [0, d * 0.4, d * 0.6], target: [0, 0, 0] },
@@ -2480,7 +2323,7 @@ function wireUIEvents() {
       };
       const v = views[btn.dataset.view];
       if (v) {
-        camera.position.set(...v.pos); controls.target.set(...v.target); controls.update();
+        sceneManager.getCamera().position.set(...v.pos); sceneManager.getControls().target.set(...v.target); sceneManager.getControls().update();
         showToast(`📷 ${btn.textContent}视角`);
       }
     });
@@ -2489,8 +2332,8 @@ function wireUIEvents() {
   // ─── Free roam ───
   document.getElementById('freeRoamBtn')?.addEventListener('click', toggleFreeRoamMode);
   document.getElementById('roamSpeedSlider')?.addEventListener('input', (e) => {
-    freeRoamSpeed = parseFloat(e.target.value);
-    document.getElementById('roamSpeedValue').textContent = freeRoamSpeed;
+    sceneManager.freeRoamSpeed = parseFloat(e.target.value);
+    document.getElementById('roamSpeedValue').textContent = sceneManager.freeRoamSpeed;
   });
 
   // ─── Clip plane ───
@@ -2599,7 +2442,7 @@ function wireUIEvents() {
     // 更新独立sprite文字
     const oldSprite = unitLabelSprites.find(s => s.userData.parentUnit === dataStore.selectedUnit);
     if (oldSprite) {
-      scene.remove(oldSprite);
+      sceneManager.getScene().remove(oldSprite);
       const idx = unitLabelSprites.indexOf(oldSprite);
       if (idx > -1) unitLabelSprites.splice(idx, 1);
       const def = getUnitDef(dataStore.selectedUnit.userData.type);
@@ -2608,7 +2451,7 @@ function wireUIEvents() {
       newSprite.position.set(dataStore.selectedUnit.position.x, dataStore.selectedUnit.position.y + spriteY, dataStore.selectedUnit.position.z);
       newSprite.userData.parentUnit = dataStore.selectedUnit;
       newSprite.userData.offsetY = spriteY;
-      scene.add(newSprite);
+      sceneManager.getScene().add(newSprite);
       unitLabelSprites.push(newSprite);
     }
     updateUnitList();
@@ -2624,12 +2467,12 @@ function wireUIEvents() {
 
   // ─── Clear buttons ───
   document.getElementById('clearAnnotBtn')?.addEventListener('click', () => {
-    annotationMeshes.forEach(a => scene.remove(a)); annotationMeshes.length = 0;
+    annotationMeshes.forEach(a => sceneManager.getScene().remove(a)); annotationMeshes.length = 0;
     showToast('🗑️ 所有标注已清除'); updateAnnotCount();
   });
   document.getElementById('clearUnitsBtn')?.addEventListener('click', () => {
-    unitMeshes.forEach(u => scene.remove(u)); unitMeshes.length = 0;
-    unitLabelSprites.forEach(s => scene.remove(s)); unitLabelSprites.length = 0;
+    unitMeshes.forEach(u => sceneManager.getScene().remove(u)); unitMeshes.length = 0;
+    unitLabelSprites.forEach(s => sceneManager.getScene().remove(s)); unitLabelSprites.length = 0;
     dataStore.selectedUnit = null; showToast('🗑️ 所有单位已清除'); updateUnitList(); updateTransformPanel();
   });
 
@@ -3087,10 +2930,10 @@ function updateUnitList() {
       const name = btn.dataset.name;
       const unit = unitMeshes.find(u => u.name === name);
       if (unit) {
-        scene.remove(unit);
+        sceneManager.getScene().remove(unit);
         const idx = unitMeshes.indexOf(unit); if (idx > -1) unitMeshes.splice(idx, 1);
         const spriteIdx = unitLabelSprites.findIndex(s => s.userData.parentUnit === unit);
-        if (spriteIdx > -1) { scene.remove(unitLabelSprites[spriteIdx]); unitLabelSprites.splice(spriteIdx, 1); }
+        if (spriteIdx > -1) { sceneManager.getScene().remove(unitLabelSprites[spriteIdx]); unitLabelSprites.splice(spriteIdx, 1); }
         if (dataStore.selectedUnit === unit) { dataStore.selectedUnit = null; updateTransformPanel(); }
         showToast('🗑️ 单位已删除'); updateUnitList();
       }
