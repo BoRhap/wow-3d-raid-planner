@@ -7,6 +7,7 @@ import { TGALoader } from 'three/addons/loaders/TGALoader.js';
 import naxx01Glb from './src/map/naxx-01.glb?url';
 import naxx02Glb from './src/map/naxx-02.glb?url';
 import { UNIT_CATEGORIES, CUSTOM_ITEM_DEFS, DEFAULT_GROUND_WIDTH, DEFAULT_GROUND_HEIGHT } from './src/Constants.js';
+import { DataStore } from './src/DataStore.js';
 
 // ============================================================
 //  WoW-Style 3D Raid Tactics Planner
@@ -14,15 +15,17 @@ import { UNIT_CATEGORIES, CUSTOM_ITEM_DEFS, DEFAULT_GROUND_WIDTH, DEFAULT_GROUND
 //  Layered unit system: Monster / Player (Role / Class)
 // ============================================================
 
+function downloadJson(data, filename) {
+  const blob = new Blob([data], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = filename; a.click();
+  URL.revokeObjectURL(url);
+}
+
 // ─── GLOBALS ────────────────────────────────────────────────
 let scene, camera, renderer, controls, raycaster, mouse, clock;
 let groundPlane, gridHelper, borderLines;
-let currentPhase = 0;
-let selectedUnit = null;
-let selectedAnnotation = null;
-let placementMode = null;
-let hoveredUnit = null;
-let hoveredAnnotation = null;
 let arrowStart = null;
 let animating = false;
 let isDragging = false;
@@ -64,7 +67,7 @@ let navSections = {
 
 // ─── VIEWPOINT MANAGEMENT ──────────────────────────────────
 function getCurrentViewpointGroups() {
-  const sd = getCurrentSceneData();
+  const sd = dataStore.getCurrentSceneData();
   return sd?.viewpointGroups || [];
 }
 
@@ -86,7 +89,7 @@ function jumpToViewpoint(vp) {
 }
 
 function saveCurrentViewpoint(name) {
-  const sd = getCurrentSceneData();
+  const sd = dataStore.getCurrentSceneData();
   if (!sd) return;
   if (!sd.viewpointGroups) sd.viewpointGroups = [{ id: 'vp_default', name: '📌 常用视角', collapsed: false, viewpoints: [] }];
   const id = `vp_${Date.now()}`;
@@ -97,9 +100,6 @@ function saveCurrentViewpoint(name) {
   renderViewpointSelector();
   return vp;
 }
-
-// ─── UNIT CLASSIFICATION MODE ──────────────────────────────
-let playerViewMode = 'role'; // 'role' or 'class'
 
 // ─── CUSTOM ITEMS REGISTRY ────────────────────────────────
 const customItemsRegistry = {};
@@ -134,41 +134,19 @@ async function loadCustomItems() {
   console.log('自定义物品已加载:', Object.keys(customItemsRegistry));
 }
 
-// ─── TWO-LEVEL SCENE SYSTEM ────────────────────────────────
-let currentSceneId = 'scene01';
-let sceneGroups = [
+// ─── DATA STORE ──────────────────────────────────────────────
+const dataStore = new DataStore([
   { id: 'raid1', name: '🏰 团队副本', collapsed: false, scenes: [
     { id: 'scene01', name: '场景01' },
     { id: 'scene02', name: '场景02' }
   ] },
   { id: 'dungeon1', name: '⚔️ 大秘境', collapsed: false, scenes: [] },
   { id: 'pvp1', name: '🛡️ PvP战场', collapsed: true, scenes: [] }
-];
+]);
 
-const sceneDataStore = {};
-
-function initSceneData(sceneId, name, modelInfo) {
-  if (!sceneDataStore[sceneId]) {
-    sceneDataStore[sceneId] = {
-      name: name || '未命名场景', model: modelInfo || null,
-      phases: [
-        { name: '阶段 1', units: [], annotations: [] },
-      ],
-      currentPhase: 0, modelBounds: null,
-      viewpointGroups: [
-        { id: 'vp_default', name: '📌 常用视角', collapsed: false, viewpoints: [] }
-      ]
-    };
-  }
-  return sceneDataStore[sceneId];
-}
-
-(function initDefaultScenes() {
-  initSceneData('scene01', '场景01', { dataUrl: naxx01Glb, fileName: 'naxx-01.glb', type: 'glb' });
-  initSceneData('scene02', '场景02', { dataUrl: naxx02Glb, fileName: 'naxx-02.glb', type: 'glb' });
-})();
-
-function getCurrentSceneData() { return sceneDataStore[currentSceneId]; }
+dataStore.initSceneData('scene01', '场景01', { dataUrl: naxx01Glb, fileName: 'naxx-01.glb', type: 'glb' });
+dataStore.initSceneData('scene02', '场景02', { dataUrl: naxx02Glb, fileName: 'naxx-02.glb', type: 'glb' });
+dataStore.currentSceneId = 'scene01';
 
 // ─── LOADERS ────────────────────────────────────────────────
 const fbxLoader = new FBXLoader();
@@ -233,7 +211,7 @@ function init() {
   buildUI();
   bindEvents();
 
-  const sd = getCurrentSceneData();
+  const sd = dataStore.getCurrentSceneData();
   if (sd.model) loadModelIntoScene(sd.model);
 
   renderer.setAnimationLoop(animate);
@@ -331,7 +309,7 @@ function loadModelIntoScene(modelInfo, callback) {
     });
 
     model.name = 'sceneModel'; scene.add(model); currentSceneModel = model;
-    const sd = getCurrentSceneData();
+    const sd = dataStore.getCurrentSceneData();
     if (sd) sd.modelBounds = { sizeX: size.x, sizeY: size.y, sizeZ: size.z };
     const finalBox = new THREE.Box3().setFromObject(model);
     clipModelMinY = finalBox.min.y; clipModelMaxY = finalBox.max.y;
@@ -377,7 +355,6 @@ function createEnvironmentDecor() {
 }
 
 // ─── PHASES ─────────────────────────────────────────────────
-function getPhases() { return getCurrentSceneData().phases; }
 
 // ════════════════════════════════════════════════════════════
 //  Q版 CHIBI UNIT CREATION — CUTE ROUNDED STYLE
@@ -1028,17 +1005,7 @@ function createLabelAnnotation(position, text) {
 
 // ─── SAVE / LOAD ────────────────────────────────────────────
 function saveCurrentState() {
-  const sd = getCurrentSceneData(); if (!sd) return;
-  const phase = sd.phases[currentPhase];
-  phase.units = unitMeshes.map(u => ({ type: u.userData.type, label: u.userData.label, x: u.position.x, y: u.position.y, z: u.position.z, rx: u.rotation.x, ry: u.rotation.y, rz: u.rotation.z, name: u.name, unitScale: u.userData.unitScale || 0.1 }));
-  phase.annotations = annotationMeshes.map(a => {
-    const d = { type: a.userData.annotationType };
-    if (d.type === 'arrow') { d.start = a.userData.start; d.end = a.userData.end; d.color = a.userData.color; }
-    else if (d.type === 'zone') { d.center = a.userData.center; d.radius = a.userData.radius; d.color = a.userData.color; d.label = a.userData.label; }
-    else if (d.type === 'label') { d.pos = a.userData.pos; d.text = a.userData.text; }
-    return d;
-  });
-  sd.currentPhase = currentPhase;
+  dataStore.savePhaseState(unitMeshes, annotationMeshes);
 }
 
 function clearSceneObjects() {
@@ -1077,31 +1044,15 @@ function loadPhaseState(phase) {
 }
 
 // ─── SCENE IMPORT / EXPORT ──────────────────────────────────
-function downloadJson(data, filename) {
-  const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url; a.download = filename; a.click();
-  URL.revokeObjectURL(url);
-}
-
 function saveSceneToJson(sceneId) {
   saveCurrentState();
-  const sd = sceneDataStore[sceneId];
-  if (!sd) { showToast('❌ 场景不存在'); return; }
+  const jsonData = dataStore.exportSceneJSON(sceneId);
+  if (!jsonData) { showToast('❌ 场景不存在'); return; }
+  const sd = dataStore.sceneDataStore[sceneId];
   const sceneName = sd.name || '未命名场景';
   const date = new Date().toLocaleDateString('zh-CN').replace(/\//g, '-');
   const filename = `场景_${sceneName}_${date}.json`;
-  const exportData = {
-    version: 1,
-    sceneId: sceneId,
-    name: sd.name,
-    phases: sd.phases,
-    currentPhase: sd.currentPhase,
-    modelBounds: sd.modelBounds,
-    viewpointGroups: sd.viewpointGroups || []
-  };
-  downloadJson(exportData, filename);
+  downloadJson(jsonData, filename);
   showToast(`✅ 已导出场景: ${sceneName}`);
 }
 
@@ -1113,12 +1064,12 @@ function loadSceneFromJson(file) {
       if (!data || !data.phases || !Array.isArray(data.phases)) {
         showToast('❌ 无效的场景文件'); return;
       }
-      const existingScene = sceneDataStore[currentSceneId];
+      const existingScene = dataStore.sceneDataStore[dataStore.currentSceneId];
       const mode = existingScene && existingScene.phases[0]?.units?.length > 0
         ? confirm('当前场景已有数据。\n确定要覆盖吗？')
         : true;
       if (!mode) return;
-      importSceneData(currentSceneId, data);
+      importSceneData(dataStore.currentSceneId, data);
       showToast(`✅ 已导入场景: ${data.name || '未命名'}`);
     } catch (err) {
       console.error('Load error:', err); showToast('❌ 场景文件加载失败');
@@ -1128,32 +1079,31 @@ function loadSceneFromJson(file) {
 }
 
 function importSceneData(sceneId, data) {
-  const existingModel = sceneDataStore[sceneId]?.model;
-  sceneDataStore[sceneId] = {
-    name: data.name || '导入场景',
-    model: data.model && data.model.dataUrl ? data.model : existingModel,
-    phases: data.phases.map((p, i) => ({
-      name: p.name || `P${i + 1}`,
-      units: p.units || [],
-      annotations: p.annotations || []
-    })),
-    currentPhase: data.currentPhase || 0,
-    modelBounds: data.modelBounds || null,
-    viewpointGroups: data.viewpointGroups || [{ id: 'vp_default', name: '📌 常用视角', collapsed: false, viewpoints: [] }]
-  };
-  if (sceneGroups.every(g => g.id !== 'imported')) {
-    const hasScene = sceneGroups.some(g => g.scenes.some(s => s.id === sceneId));
+  const existingModel = dataStore.sceneDataStore[sceneId]?.model;
+  dataStore.importSceneJSON(JSON.stringify(data), sceneId, existingModel);
+  const sd = dataStore.sceneDataStore[sceneId];
+  sd.name = data.name || '导入场景';
+  sd.phases = data.phases.map((p, i) => ({
+    name: p.name || `P${i + 1}`,
+    units: p.units || [],
+    annotations: p.annotations || []
+  }));
+  sd.currentPhase = data.currentPhase || 0;
+  sd.modelBounds = data.modelBounds || null;
+  sd.viewpointGroups = data.viewpointGroups || [{ id: 'vp_default', name: '📌 常用视角', collapsed: false, viewpoints: [] }];
+  if (dataStore.sceneGroups.every(g => g.id !== 'imported')) {
+    const hasScene = dataStore.sceneGroups.some(g => g.scenes.some(s => s.id === sceneId));
     if (!hasScene) {
-      const group = sceneGroups.find(g => g.id === 'raid1') || sceneGroups[0];
+      const group = dataStore.sceneGroups.find(g => g.id === 'raid1') || dataStore.sceneGroups[0];
       group.scenes.push({ id: sceneId, name: data.name || '导入场景' });
     }
   }
   renderSceneSelector();
   renderViewpointSelector();
-  if (sceneId === currentSceneId) {
-    currentPhase = sceneDataStore[sceneId].currentPhase || 0;
-    applySceneModel(sceneDataStore[sceneId], () => {
-      loadPhaseState(sceneDataStore[sceneId].phases[currentPhase]);
+  if (sceneId === dataStore.currentSceneId) {
+    dataStore.currentPhase = dataStore.sceneDataStore[sceneId].currentPhase || 0;
+    applySceneModel(dataStore.sceneDataStore[sceneId], () => {
+      loadPhaseState(dataStore.sceneDataStore[sceneId].phases[dataStore.currentPhase]);
       renderPhaseBar();
       updateUnitList();
     });
@@ -1173,29 +1123,29 @@ function applySceneModel(sd, onReady) {
 }
 
 function switchScene(sceneId) {
-  if (sceneId === currentSceneId || animating) return;
-  saveCurrentState(); currentSceneId = sceneId;
-  const sd = getCurrentSceneData(); if (!sd) return;
-  currentPhase = sd.currentPhase || 0;
+  if (sceneId === dataStore.currentSceneId || animating) return;
+  saveCurrentState(); dataStore.currentSceneId = sceneId;
+  const sd = dataStore.getCurrentSceneData(); if (!sd) return;
+  dataStore.currentPhase = sd.currentPhase || 0;
   applySceneModel(sd, () => {
-    loadPhaseState(sd.phases[currentPhase]);
+    loadPhaseState(sd.phases[dataStore.currentPhase]);
     renderPhaseBar(); renderSceneSelector(); renderViewpointSelector(); updateUnitList();
     showToast(`🗺️ 已切换到: ${sd.name}`);
   });
 }
 
 function switchPhase(newIdx, withAnimation = true) {
-  const phases = getPhases();
-  if (newIdx === currentPhase || newIdx < 0 || newIdx >= phases.length || animating) return;
+  const phases = dataStore.getPhases();
+  if (newIdx === dataStore.currentPhase || newIdx < 0 || newIdx >= phases.length || animating) return;
   saveCurrentState();
-  const oldPhase = phases[currentPhase], newPhase = phases[newIdx];
+  const oldPhase = phases[dataStore.currentPhase], newPhase = phases[newIdx];
   if (withAnimation && oldPhase.units?.length > 0 && newPhase.units?.length > 0) {
     animatePhaseTransition(oldPhase, newPhase, () => {
-      currentPhase = newIdx; getCurrentSceneData().currentPhase = currentPhase;
+      dataStore.currentPhase = newIdx; dataStore.getCurrentSceneData().currentPhase = dataStore.currentPhase;
       renderPhaseBar(); updateUnitList();
     });
   } else {
-    currentPhase = newIdx; getCurrentSceneData().currentPhase = currentPhase;
+    dataStore.currentPhase = newIdx; dataStore.getCurrentSceneData().currentPhase = dataStore.currentPhase;
     loadPhaseState(newPhase); renderPhaseBar(); updateUnitList();
   }
 }
@@ -1288,8 +1238,8 @@ async function handleModelUpload(files, targetGroupId) {
     const sceneId = `scene_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`;
     const sceneName = file.name.replace(/\.[^.]+$/, '');
     const type = (ext === 'glb' || ext === 'gltf') ? 'glb' : 'fbx';
-    initSceneData(sceneId, sceneName, { dataUrl, fileName: file.name, type });
-    let group = sceneGroups.find(g => g.id === targetGroupId) || sceneGroups[0];
+    dataStore.initSceneData(sceneId, sceneName, { dataUrl, fileName: file.name, type });
+    let group = dataStore.sceneGroups.find(g => g.id === targetGroupId) || dataStore.sceneGroups[0];
     group.scenes.push({ id: sceneId, name: sceneName }); group.collapsed = false;
     renderSceneSelector(); showToast(`✅ 已添加模型场景: ${sceneName}`);
   }
@@ -1300,7 +1250,7 @@ async function handleSingleModelUpload(file) {
   if (!['fbx', 'glb', 'gltf'].includes(ext)) { showToast(`⚠️ 不支持的格式: .${ext}`); return; }
   const dataUrl = await new Promise(r => { const rd = new FileReader(); rd.onload = e => r(e.target.result); rd.readAsDataURL(file); });
   const type = (ext === 'glb' || ext === 'gltf') ? 'glb' : 'fbx';
-  const sd = getCurrentSceneData();
+  const sd = dataStore.getCurrentSceneData();
   sd.model = { dataUrl, fileName: file.name, type };
   applySceneModel(sd, () => {
     renderSceneSelector();
@@ -1440,7 +1390,7 @@ function bindEvents() {
   renderer.domElement.addEventListener('mousedown', onMouseDown);
   renderer.domElement.addEventListener('mouseup', onMouseUp);
   renderer.domElement.addEventListener('contextmenu', (e) => {
-    e.preventDefault(); selectedUnit = null; selectedAnnotation = null; placementMode = null; arrowStart = null;
+    e.preventDefault(); dataStore.selectedUnit = null; dataStore.selectedAnnotation = null; dataStore.placementMode = null; arrowStart = null;
     updateToolbarSelection(); clearSelectionVisuals(); clearAnnotationSelection(); hideAnnotationEditPanel();
   });
   window.addEventListener('resize', onResize);
@@ -1462,16 +1412,16 @@ function onCanvasClick(e) {
   point.x = Math.max(-halfW, Math.min(halfW, point.x));
   point.z = Math.max(-halfH, Math.min(halfH, point.z));
 
-  if (placementMode) {
+  if (dataStore.placementMode) {
     const allUnits = { ...UNIT_CATEGORIES.monsters.units, ...UNIT_CATEGORIES.players_role.units, ...UNIT_CATEGORIES.players_class.units, ...UNIT_CATEGORIES.custom.units };
-    if (allUnits[placementMode]) {
+    if (allUnits[dataStore.placementMode]) {
       const labelInput = document.getElementById('unitLabelInput');
       const label = labelInput?.value || '';
       let mesh;
-      if (UNIT_CATEGORIES.custom.units[placementMode]) {
-        mesh = createCustomMesh(placementMode, point.x, point.z, label || undefined);
+      if (UNIT_CATEGORIES.custom.units[dataStore.placementMode]) {
+        mesh = createCustomMesh(dataStore.placementMode, point.x, point.z, label || undefined);
       } else {
-        mesh = createUnitMesh(placementMode, point.x, point.z, label || undefined);
+        mesh = createUnitMesh(dataStore.placementMode, point.x, point.z, label || undefined);
       }
       mesh.position.y = point.y || 0;
       // 同步精灵位置
@@ -1479,20 +1429,20 @@ function onCanvasClick(e) {
       if (sprite) {
         sprite.position.set(mesh.position.x, mesh.position.y + sprite.userData.offsetY, mesh.position.z);
       }
-      const def = getUnitDef(placementMode);
+      const def = getUnitDef(dataStore.placementMode);
       showToast(`✅ 已放置 ${def.icon} ${def.label}`);
-    } else if (placementMode === 'arrow') {
+    } else if (dataStore.placementMode === 'arrow') {
       if (!arrowStart) { arrowStart = point.clone(); arrowStart.y += 0.3; showToast('📍 点击第二个点完成箭头'); }
       else {
         const endPoint = point.clone(); endPoint.y += 0.3;
         createArrowAnnotation(arrowStart, endPoint); arrowStart = null; showToast('✅ 箭头已添加');
       }
-    } else if (placementMode === 'zone') {
+    } else if (dataStore.placementMode === 'zone') {
       const radius = parseFloat(document.getElementById('zoneRadiusInput')?.value) || 4;
       const zoneLabel = document.getElementById('zoneLabelInput')?.value || '危险区域';
       const zoneColor = parseInt(document.getElementById('zoneColorInput')?.value?.replace('#', ''), 16) || 0xef4444;
       createZoneAnnotation(point, radius, zoneColor, zoneLabel); showToast('✅ 区域标记已添加');
-    } else if (placementMode === 'label') {
+    } else if (dataStore.placementMode === 'label') {
       const text = document.getElementById('annotationTextInput')?.value || '标记点';
       createLabelAnnotation(point, text); showToast('✅ 标签已添加');
     }
@@ -1503,17 +1453,17 @@ function onCanvasClick(e) {
   const annotation = getAnnotationIntersect(e);
   if (annotation) {
     clearAnnotationSelection();
-    selectedAnnotation = annotation;
+    dataStore.selectedAnnotation = annotation;
     addAnnotationSelection(annotation);
     window.currentSelectedAnnotation = annotation;
     showAnnotationEditPanel(annotation, e.clientX, e.clientY);
   }
-  else if (unit) { clearAnnotationSelection(); selectedUnit = unit; addSelectionVisual(unit); updateTransformPanel(); hideAnnotationEditPanel(); }
-  else { clearAnnotationSelection(); clearSelectionVisuals(); selectedUnit = null; updateTransformPanel(); hideAnnotationEditPanel(); }
+  else if (unit) { clearAnnotationSelection(); dataStore.selectedUnit = unit; addSelectionVisual(unit); updateTransformPanel(); hideAnnotationEditPanel(); }
+  else { clearAnnotationSelection(); clearSelectionVisuals(); dataStore.selectedUnit = null; updateTransformPanel(); hideAnnotationEditPanel(); }
 }
 
 function onMouseDown(e) {
-  if (animating || placementMode) return;
+  if (animating || dataStore.placementMode) return;
   const unit = getUnitIntersect(e);
   if (unit) { isDragging = true; dragTarget = unit; controls.enabled = false; }
 }
@@ -1540,7 +1490,7 @@ function onCanvasMouseMove(e) {
       if (sprite) {
         sprite.position.set(dragTarget.position.x, dragTarget.position.y + sprite.userData.offsetY, dragTarget.position.z);
       }
-      if (dragTarget === selectedUnit) {
+      if (dragTarget === dataStore.selectedUnit) {
         document.getElementById('posX').value = dragTarget.position.x.toFixed(2);
         document.getElementById('posY').value = dragTarget.position.y.toFixed(2);
         document.getElementById('posZ').value = dragTarget.position.z.toFixed(2);
@@ -1550,13 +1500,13 @@ function onCanvasMouseMove(e) {
   }
   const unit = getUnitIntersect(e);
   const annotation = getAnnotationIntersect(e);
-  if (unit !== hoveredUnit) {
-    if (hoveredUnit && hoveredUnit !== selectedUnit) {
-      hoveredUnit.traverse(c => { if (c.isMesh && c.material.emissiveIntensity !== undefined) c.material.emissiveIntensity = c.material.userData?.origEmissive || 0.15; });
+  if (unit !== dataStore.hoveredUnit) {
+    if (dataStore.hoveredUnit && dataStore.hoveredUnit !== dataStore.selectedUnit) {
+      dataStore.hoveredUnit.traverse(c => { if (c.isMesh && c.material.emissiveIntensity !== undefined) c.material.emissiveIntensity = c.material.userData?.origEmissive || 0.15; });
     }
-    hoveredUnit = unit;
-    if (hoveredUnit) {
-      hoveredUnit.traverse(c => {
+    dataStore.hoveredUnit = unit;
+    if (dataStore.hoveredUnit) {
+      dataStore.hoveredUnit.traverse(c => {
         if (c.isMesh && c.material.emissiveIntensity !== undefined) {
           c.material.userData = c.material.userData || {};
           c.material.userData.origEmissive = c.material.emissiveIntensity;
@@ -1566,13 +1516,13 @@ function onCanvasMouseMove(e) {
       renderer.domElement.style.cursor = 'grab';
     }
   }
-  if (annotation !== hoveredAnnotation) {
-    if (hoveredAnnotation && hoveredAnnotation !== selectedAnnotation) {
-      hoveredAnnotation.traverse(c => { if (c.isMesh && c.material.opacity !== undefined && c.material.userData?.origOpacity !== undefined) c.material.opacity = c.material.userData.origOpacity; });
+  if (annotation !== dataStore.hoveredAnnotation) {
+    if (dataStore.hoveredAnnotation && dataStore.hoveredAnnotation !== dataStore.selectedAnnotation) {
+      dataStore.hoveredAnnotation.traverse(c => { if (c.isMesh && c.material.opacity !== undefined && c.material.userData?.origOpacity !== undefined) c.material.opacity = c.material.userData.origOpacity; });
     }
-    hoveredAnnotation = annotation;
-    if (hoveredAnnotation) {
-      hoveredAnnotation.traverse(c => {
+    dataStore.hoveredAnnotation = annotation;
+    if (dataStore.hoveredAnnotation) {
+      dataStore.hoveredAnnotation.traverse(c => {
         if (c.isMesh && c.material.opacity !== undefined) {
           c.material.userData = c.material.userData || {};
           c.material.userData.origOpacity = c.material.opacity;
@@ -1580,8 +1530,8 @@ function onCanvasMouseMove(e) {
         }
       });
       renderer.domElement.style.cursor = 'pointer';
-    } else if (!hoveredUnit) {
-      renderer.domElement.style.cursor = placementMode ? 'crosshair' : 'default';
+    } else if (!dataStore.hoveredUnit) {
+      renderer.domElement.style.cursor = dataStore.placementMode ? 'crosshair' : 'default';
     }
   }
 }
@@ -1598,25 +1548,25 @@ function onKeyDown(e) {
   if (key === 'shift') keys.shift = true;
   if (key === 'f') toggleFreeRoamMode();
   if (e.key === 'Delete' || e.key === 'Backspace') {
-    if (selectedAnnotation && !e.target.closest('input')) {
-      scene.remove(selectedAnnotation); const idx = annotationMeshes.indexOf(selectedAnnotation);
+    if (dataStore.selectedAnnotation && !e.target.closest('input')) {
+      scene.remove(dataStore.selectedAnnotation); const idx = annotationMeshes.indexOf(dataStore.selectedAnnotation);
       if (idx > -1) annotationMeshes.splice(idx, 1);
-      selectedAnnotation = null; showToast('🗑️ 标注已删除'); updateAnnotCount();
-    } else if (selectedUnit && !e.target.closest('input')) {
-      scene.remove(selectedUnit); const idx = unitMeshes.indexOf(selectedUnit);
+      dataStore.selectedAnnotation = null; showToast('🗑️ 标注已删除'); updateAnnotCount();
+    } else if (dataStore.selectedUnit && !e.target.closest('input')) {
+      scene.remove(dataStore.selectedUnit); const idx = unitMeshes.indexOf(dataStore.selectedUnit);
       if (idx > -1) unitMeshes.splice(idx, 1);
       // 同时删除关联的精灵
-      const spriteIdx = unitLabelSprites.findIndex(s => s.userData.parentUnit === selectedUnit);
+      const spriteIdx = unitLabelSprites.findIndex(s => s.userData.parentUnit === dataStore.selectedUnit);
       if (spriteIdx > -1) {
         scene.remove(unitLabelSprites[spriteIdx]);
         unitLabelSprites.splice(spriteIdx, 1);
       }
-      selectedUnit = null; showToast('🗑️ 单位已删除'); updateUnitList(); updateTransformPanel();
+      dataStore.selectedUnit = null; showToast('🗑️ 单位已删除'); updateUnitList(); updateTransformPanel();
     }
   }
   if (e.key === 'Escape') {
     if (freeRoamMode && isPointerLocked) { document.exitPointerLock(); return; }
-    placementMode = null; arrowStart = null; selectedUnit = null; selectedAnnotation = null;
+    dataStore.placementMode = null; arrowStart = null; dataStore.selectedUnit = null; dataStore.selectedAnnotation = null;
     clearSelectionVisuals(); clearAnnotationSelection(); updateToolbarSelection(); updateTransformPanel();
     hideAnnotationEditPanel();
   }
@@ -1705,11 +1655,11 @@ function animate() {
   updateFreeRoamMovement(delta);
   unitMeshes.forEach((u, i) => {
     // Idle bob
-    if (u !== selectedUnit) {
+    if (u !== dataStore.selectedUnit) {
       const bob = Math.sin(t * 2 + i * 0.7) * 0.03;
       u.children.forEach(c => { if (c.isMesh || c.isGroup) c.position.y += bob * 0.1; });
     }
-    if (u === selectedUnit) {
+    if (u === dataStore.selectedUnit) {
       const pulse = 1 + Math.sin(t * 3) * 0.03;
       const base = u.userData.unitScale || 0.1;
       u.scale.set(base * pulse, base * pulse, base * pulse);
@@ -2441,11 +2391,11 @@ function populateCustomGrid() {
     card.addEventListener('click', () => {
       const unitType = card.dataset.unit;
       const item = customItemsRegistry[unitType];
-      if (placementMode === unitType) {
-        placementMode = null;
+      if (dataStore.placementMode === unitType) {
+        dataStore.placementMode = null;
         card.classList.remove('active');
       } else {
-        placementMode = unitType;
+        dataStore.placementMode = unitType;
         document.querySelectorAll('.unit-card').forEach(c => c.classList.remove('active'));
         document.querySelectorAll('.nav-tool-btn').forEach(b => {
           if (['arrow', 'zone', 'label'].includes(b.dataset.tool)) b.classList.remove('active');
@@ -2462,7 +2412,7 @@ function populateCustomGrid() {
 function renderPlayerGrid() {
   const grid = document.getElementById('playerGrid');
   if (!grid) return;
-  const source = playerViewMode === 'role' ? UNIT_CATEGORIES.players_role : UNIT_CATEGORIES.players_class;
+  const source = dataStore.playerViewMode === 'role' ? UNIT_CATEGORIES.players_role : UNIT_CATEGORIES.players_class;
   let html = `<div class="unit-category-label"><span class="cat-dot" style="background:#a855f7;"></span>${source.label}</div><div class="unit-grid">`;
   for (const [key, unit] of Object.entries(source.units)) {
     const colorHex = '#' + unit.color.toString(16).padStart(6, '0');
@@ -2474,9 +2424,9 @@ function renderPlayerGrid() {
   grid.querySelectorAll('.unit-card').forEach(card => {
     card.addEventListener('click', () => {
       const unitType = card.dataset.unit;
-      if (placementMode === unitType) { placementMode = null; card.classList.remove('active'); }
+      if (dataStore.placementMode === unitType) { dataStore.placementMode = null; card.classList.remove('active'); }
       else {
-        placementMode = unitType; arrowStart = null;
+        dataStore.placementMode = unitType; arrowStart = null;
         document.querySelectorAll('.unit-card').forEach(c => c.classList.remove('active'));
         document.querySelectorAll('.nav-tool-btn').forEach(b => { if (['arrow','zone','label'].includes(b.dataset.tool)) b.classList.remove('active'); });
         card.classList.add('active');
@@ -2585,7 +2535,7 @@ function wireUIEvents() {
     tab.addEventListener('click', () => {
       document.querySelectorAll('.unit-sub-tab').forEach(t => t.classList.remove('active'));
       tab.classList.add('active');
-      playerViewMode = tab.dataset.pmode;
+      dataStore.playerViewMode = tab.dataset.pmode;
       renderPlayerGrid();
     });
   });
@@ -2594,9 +2544,9 @@ function wireUIEvents() {
   document.querySelectorAll('#monsterGrid .unit-card').forEach(card => {
     card.addEventListener('click', () => {
       const unitType = card.dataset.unit;
-      if (placementMode === unitType) { placementMode = null; card.classList.remove('active'); }
+      if (dataStore.placementMode === unitType) { dataStore.placementMode = null; card.classList.remove('active'); }
       else {
-        placementMode = unitType; arrowStart = null;
+        dataStore.placementMode = unitType; arrowStart = null;
         document.querySelectorAll('.unit-card').forEach(c => c.classList.remove('active'));
         document.querySelectorAll('.nav-tool-btn').forEach(b => { if (['arrow','zone','label'].includes(b.dataset.tool)) b.classList.remove('active'); });
         card.classList.add('active');
@@ -2612,12 +2562,12 @@ function wireUIEvents() {
   document.querySelectorAll('.nav-tool-btn[data-tool="arrow"], .nav-tool-btn[data-tool="zone"], .nav-tool-btn[data-tool="label"]').forEach(btn => {
     btn.addEventListener('click', () => {
       const tool = btn.dataset.tool;
-      if (placementMode === tool) {
-        placementMode = null; btn.classList.remove('active');
+      if (dataStore.placementMode === tool) {
+        dataStore.placementMode = null; btn.classList.remove('active');
         document.getElementById('zoneOptions')?.classList.remove('visible');
         document.getElementById('labelOptions')?.classList.remove('visible');
       } else {
-        placementMode = tool; arrowStart = null;
+        dataStore.placementMode = tool; arrowStart = null;
         document.querySelectorAll('.unit-card').forEach(c => c.classList.remove('active'));
         document.querySelectorAll('.nav-tool-btn').forEach(b => { if (['arrow','zone','label'].includes(b.dataset.tool)) b.classList.remove('active'); });
         btn.classList.add('active');
@@ -2643,20 +2593,20 @@ function wireUIEvents() {
     applyTransform();
   });
   document.getElementById('unitNameInput')?.addEventListener('change', (e) => {
-    if (!selectedUnit) return;
+    if (!dataStore.selectedUnit) return;
     const newLabel = e.target.value;
-    selectedUnit.userData.label = newLabel;
+    dataStore.selectedUnit.userData.label = newLabel;
     // 更新独立sprite文字
-    const oldSprite = unitLabelSprites.find(s => s.userData.parentUnit === selectedUnit);
+    const oldSprite = unitLabelSprites.find(s => s.userData.parentUnit === dataStore.selectedUnit);
     if (oldSprite) {
       scene.remove(oldSprite);
       const idx = unitLabelSprites.indexOf(oldSprite);
       if (idx > -1) unitLabelSprites.splice(idx, 1);
-      const def = getUnitDef(selectedUnit.userData.type);
+      const def = getUnitDef(dataStore.selectedUnit.userData.type);
       const newSprite = createTextSprite(newLabel || def.label, def.color);
       const spriteY = 0.5;
-      newSprite.position.set(selectedUnit.position.x, selectedUnit.position.y + spriteY, selectedUnit.position.z);
-      newSprite.userData.parentUnit = selectedUnit;
+      newSprite.position.set(dataStore.selectedUnit.position.x, dataStore.selectedUnit.position.y + spriteY, dataStore.selectedUnit.position.z);
+      newSprite.userData.parentUnit = dataStore.selectedUnit;
       newSprite.userData.offsetY = spriteY;
       scene.add(newSprite);
       unitLabelSprites.push(newSprite);
@@ -2680,7 +2630,7 @@ function wireUIEvents() {
   document.getElementById('clearUnitsBtn')?.addEventListener('click', () => {
     unitMeshes.forEach(u => scene.remove(u)); unitMeshes.length = 0;
     unitLabelSprites.forEach(s => scene.remove(s)); unitLabelSprites.length = 0;
-    selectedUnit = null; showToast('🗑️ 所有单位已清除'); updateUnitList(); updateTransformPanel();
+    dataStore.selectedUnit = null; showToast('🗑️ 所有单位已清除'); updateUnitList(); updateTransformPanel();
   });
 
   // ─── Model uploads ───
@@ -2697,8 +2647,8 @@ function wireUIEvents() {
   batchUploadZone?.addEventListener('click', () => batchInput?.click());
   batchUploadZone?.addEventListener('dragover', (e) => { e.preventDefault(); batchUploadZone.classList.add('dragover'); });
   batchUploadZone?.addEventListener('dragleave', () => batchUploadZone.classList.remove('dragover'));
-  batchUploadZone?.addEventListener('drop', (e) => { e.preventDefault(); batchUploadZone.classList.remove('dragover'); if (e.dataTransfer.files.length) handleModelUpload(e.dataTransfer.files, sceneGroups[0]?.id); });
-  batchInput?.addEventListener('change', (e) => { if (e.target.files.length) handleModelUpload(e.target.files, sceneGroups[0]?.id); });
+  batchUploadZone?.addEventListener('drop', (e) => { e.preventDefault(); batchUploadZone.classList.remove('dragover'); if (e.dataTransfer.files.length) handleModelUpload(e.dataTransfer.files, dataStore.sceneGroups[0]?.id); });
+  batchInput?.addEventListener('change', (e) => { if (e.target.files.length) handleModelUpload(e.target.files, dataStore.sceneGroups[0]?.id); });
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -2737,7 +2687,7 @@ function renderSceneSelector() {
   const container = document.getElementById('sceneSelector'); if (!container) return;
   let totalScenes = 0;
   let html = '';
-  sceneGroups.forEach(group => {
+  dataStore.sceneGroups.forEach(group => {
     const sceneCount = group.scenes.length;
     totalScenes += sceneCount;
     html += `<div class="scene-group">
@@ -2753,9 +2703,9 @@ function renderSceneSelector() {
       </div>
       <div class="scene-group-body ${group.collapsed ? 'collapsed' : ''}">`;
     group.scenes.forEach(sc => {
-      const sd = sceneDataStore[sc.id];
+      const sd = dataStore.sceneDataStore[sc.id];
       const hasModel = sd?.model;
-      const isActive = sc.id === currentSceneId;
+      const isActive = sc.id === dataStore.currentSceneId;
       const phases = sd?.phases?.length || 0;
       html += `<div class="scene-card ${isActive ? 'active' : ''}" data-sid="${sc.id}">
         <div class="thumb">${hasModel ? '🏔️' : '🗺️'}</div>
@@ -2783,7 +2733,7 @@ function renderSceneSelector() {
     h.addEventListener('click', (e) => {
       if (e.target.closest('[data-grp-action]')) return;
       const gid = h.dataset.gid;
-      const g = sceneGroups.find(x => x.id === gid);
+      const g = dataStore.sceneGroups.find(x => x.id === gid);
       if (g) { g.collapsed = !g.collapsed; renderSceneSelector(); }
     });
   });
@@ -2796,10 +2746,10 @@ function renderSceneSelector() {
   container.querySelectorAll('[data-grp-action="add"]').forEach(btn => {
     btn.addEventListener('click', () => {
       const gid = btn.dataset.gid;
-      const g = sceneGroups.find(x => x.id === gid); if (!g) return;
+      const g = dataStore.sceneGroups.find(x => x.id === gid); if (!g) return;
       const sceneId = `scene_${Date.now()}`;
       const name = `场景 ${g.scenes.length + 1}`;
-      initSceneData(sceneId, name, null);
+      dataStore.initSceneData(sceneId, name, null);
       g.scenes.push({ id: sceneId, name }); g.collapsed = false;
       renderSceneSelector(); showToast(`✅ 已添加: ${name}`);
     });
@@ -2807,26 +2757,26 @@ function renderSceneSelector() {
   container.querySelectorAll('[data-grp-action="rename"]').forEach(btn => {
     btn.addEventListener('click', () => {
       const gid = btn.dataset.gid;
-      const g = sceneGroups.find(x => x.id === gid); if (!g) return;
+      const g = dataStore.sceneGroups.find(x => x.id === gid); if (!g) return;
       const name = prompt('输入新分组名称:', g.name); if (name) { g.name = name; renderSceneSelector(); }
     });
   });
   container.querySelectorAll('[data-grp-action="del"]').forEach(btn => {
     btn.addEventListener('click', () => {
       const gid = btn.dataset.gid;
-      if (sceneGroups.length <= 1) { showToast('⚠️ 至少保留一个分组'); return; }
+      if (dataStore.sceneGroups.length <= 1) { showToast('⚠️ 至少保留一个分组'); return; }
       if (!confirm('确定删除此分组?')) return;
-      sceneGroups = sceneGroups.filter(x => x.id !== gid); renderSceneSelector();
+      dataStore.sceneGroups = dataStore.sceneGroups.filter(x => x.id !== gid); renderSceneSelector();
     });
   });
   container.querySelectorAll('[data-card-action="rename"]').forEach(btn => {
     btn.addEventListener('click', () => {
       const sid = btn.dataset.sid;
-      const sd = sceneDataStore[sid]; if (!sd) return;
+      const sd = dataStore.sceneDataStore[sid]; if (!sd) return;
       const name = prompt('输入新场景名称:', sd.name);
       if (name) {
         sd.name = name;
-        for (const g of sceneGroups) { const s = g.scenes.find(x => x.id === sid); if (s) s.name = name; }
+        for (const g of dataStore.sceneGroups) { const s = g.scenes.find(x => x.id === sid); if (s) s.name = name; }
         renderSceneSelector();
       }
     });
@@ -2834,17 +2784,17 @@ function renderSceneSelector() {
   container.querySelectorAll('[data-card-action="del"]').forEach(btn => {
     btn.addEventListener('click', () => {
       const sid = btn.dataset.sid; const gid = btn.dataset.gid;
-      if (sid === currentSceneId) { showToast('⚠️ 不能删除当前活动场景'); return; }
+      if (sid === dataStore.currentSceneId) { showToast('⚠️ 不能删除当前活动场景'); return; }
       if (!confirm('确定删除此场景?')) return;
-      const g = sceneGroups.find(x => x.id === gid);
+      const g = dataStore.sceneGroups.find(x => x.id === gid);
       if (g) g.scenes = g.scenes.filter(x => x.id !== sid);
-      delete sceneDataStore[sid]; renderSceneSelector();
+      delete dataStore.sceneDataStore[sid]; renderSceneSelector();
     });
   });
   document.getElementById('addGroupBtn')?.addEventListener('click', () => {
     const name = prompt('输入分组名称:', '新分组');
     if (name) {
-      sceneGroups.push({ id: `grp_${Date.now()}`, name, collapsed: false, scenes: [] });
+      dataStore.sceneGroups.push({ id: `grp_${Date.now()}`, name, collapsed: false, scenes: [] });
       renderSceneSelector(); showToast(`✅ 分组已创建: ${name}`);
     }
   });
@@ -2862,7 +2812,7 @@ function renderSceneSelector() {
       fileInput?.click();
     });
     exportBtn?.addEventListener('click', () => {
-      saveSceneToJson(currentSceneId);
+      saveSceneToJson(dataStore.currentSceneId);
     });
     const fileInput = document.getElementById('sceneFileInput');
     fileInput?.addEventListener('change', (e) => {
@@ -2884,7 +2834,7 @@ function renderViewpointSelector() {
   const container = document.getElementById('viewpointSelector');
   if (!container) return;
 
-  const sd = getCurrentSceneData();
+  const sd = dataStore.getCurrentSceneData();
   if (!sd) return;
   if (!sd.viewpointGroups) sd.viewpointGroups = [{ id: 'vp_default', name: '📌 常用视角', collapsed: false, viewpoints: [] }];
   const vpGroups = sd.viewpointGroups;
@@ -3065,10 +3015,10 @@ function renderViewpointSelector() {
 // ═══════════════════════════════════════════════════════════
 function renderPhaseBar() {
   const bar = document.getElementById('phaseBar'); if (!bar) return;
-  const phases = getPhases();
+  const phases = dataStore.getPhases();
   let html = '';
   phases.forEach((p, i) => {
-    html += `<button class="phase-btn ${i === currentPhase ? 'active' : ''}" data-phase="${i}">${p.name}</button>`;
+    html += `<button class="phase-btn ${i === dataStore.currentPhase ? 'active' : ''}" data-phase="${i}">${p.name}</button>`;
   });
   html += `<button class="action-btn" id="addPhaseBtn" style="margin-left:8px;">+ 阶段</button>`;
   html += `<button class="action-btn" id="playAllBtn" style="margin-left:4px;">▶ 演示</button>`;
@@ -3077,18 +3027,18 @@ function renderPhaseBar() {
     btn.addEventListener('click', () => switchPhase(parseInt(btn.dataset.phase)));
     btn.addEventListener('dblclick', () => {
       const idx = parseInt(btn.dataset.phase);
-      const phases = getPhases();
+      const phases = dataStore.getPhases();
       const newName = prompt('阶段名称:', phases[idx].name);
       if (newName) { phases[idx].name = newName; renderPhaseBar(); }
     });
   });
   document.getElementById('addPhaseBtn')?.addEventListener('click', () => {
-    const phases = getPhases();
+    const phases = dataStore.getPhases();
     const name = prompt('阶段名称:', `阶段 ${phases.length + 1}`);
     if (name) { phases.push({ name, units: [], annotations: [] }); renderPhaseBar(); showToast(`✅ 已添加阶段: ${name}`); }
   });
   document.getElementById('playAllBtn')?.addEventListener('click', () => {
-    const phases = getPhases();
+    const phases = dataStore.getPhases();
     if (phases.length < 2) { showToast('⚠️ 至少需要两个阶段'); return; }
     let idx = 0;
     const play = () => {
@@ -3128,7 +3078,7 @@ function updateUnitList() {
     item.addEventListener('click', () => {
       const name = item.dataset.name;
       const unit = unitMeshes.find(u => u.name === name);
-      if (unit) { clearSelectionVisuals(); selectedUnit = unit; addSelectionVisual(unit); updateTransformPanel(); }
+      if (unit) { clearSelectionVisuals(); dataStore.selectedUnit = unit; addSelectionVisual(unit); updateTransformPanel(); }
     });
   });
   container.querySelectorAll('.unit-del-btn').forEach(btn => {
@@ -3141,7 +3091,7 @@ function updateUnitList() {
         const idx = unitMeshes.indexOf(unit); if (idx > -1) unitMeshes.splice(idx, 1);
         const spriteIdx = unitLabelSprites.findIndex(s => s.userData.parentUnit === unit);
         if (spriteIdx > -1) { scene.remove(unitLabelSprites[spriteIdx]); unitLabelSprites.splice(spriteIdx, 1); }
-        if (selectedUnit === unit) { selectedUnit = null; updateTransformPanel(); }
+        if (dataStore.selectedUnit === unit) { dataStore.selectedUnit = null; updateTransformPanel(); }
         showToast('🗑️ 单位已删除'); updateUnitList();
       }
     });
@@ -3151,7 +3101,7 @@ function updateUnitList() {
 
 function buildUnitListItem(u) {
   const def = getUnitDef(u.userData.type);
-  const isSelected = u === selectedUnit;
+  const isSelected = u === dataStore.selectedUnit;
   const colorHex = '#' + def.color.toString(16).padStart(6, '0');
   return `<div class="unit-list-item" data-name="${u.name}" style="display:flex; align-items:center; gap:5px; padding:4px 6px; border-radius:5px; cursor:pointer; margin-bottom:1px; border:1px solid ${isSelected ? 'rgba(168,85,247,0.3)' : 'transparent'}; background:${isSelected ? 'rgba(168,85,247,0.1)' : 'transparent'}; transition:all 0.12s;">
     <div style="width:4px; height:16px; border-radius:2px; background:${colorHex}; opacity:0.6;"></div>
@@ -3179,11 +3129,11 @@ function updateToolbarSelection() {
 function updateTransformPanel() {
   const panel = document.getElementById('transformPanel');
   if (!panel) return;
-  if (!selectedUnit) { panel.style.display = 'none'; return; }
+  if (!dataStore.selectedUnit) { panel.style.display = 'none'; return; }
   panel.style.display = 'block';
-  const p = selectedUnit.position;
-  const r = selectedUnit.rotation;
-  const s = selectedUnit.scale.x;
+  const p = dataStore.selectedUnit.position;
+  const r = dataStore.selectedUnit.rotation;
+  const s = dataStore.selectedUnit.scale.x;
   document.getElementById('posX').value = p.x.toFixed(2);
   document.getElementById('posY').value = p.y.toFixed(2);
   document.getElementById('posZ').value = p.z.toFixed(2);
@@ -3192,11 +3142,11 @@ function updateTransformPanel() {
   document.getElementById('rotZ').value = (r.z * 180 / Math.PI).toFixed(1);
   document.getElementById('scaleInput').value = s.toFixed(3);
   document.getElementById('unitScaleSlider').value = s;
-  document.getElementById('unitNameInput').value = selectedUnit.userData.label || '';
+  document.getElementById('unitNameInput').value = dataStore.selectedUnit.userData.label || '';
 }
 
 function applyTransform() {
-  if (!selectedUnit) return;
+  if (!dataStore.selectedUnit) return;
   const px = parseFloat(document.getElementById('posX').value) || 0;
   const py = parseFloat(document.getElementById('posY').value) || 0;
   const pz = parseFloat(document.getElementById('posZ').value) || 0;
@@ -3204,12 +3154,12 @@ function applyTransform() {
   const ry = (parseFloat(document.getElementById('rotY').value) || 0) * Math.PI / 180;
   const rz = (parseFloat(document.getElementById('rotZ').value) || 0) * Math.PI / 180;
   const scale = parseFloat(document.getElementById('scaleInput').value) || 0.1;
-  selectedUnit.position.set(px, py, pz);
-  selectedUnit.rotation.set(rx, ry, rz);
-  selectedUnit.scale.set(scale, scale, scale);
-  selectedUnit.userData.unitScale = scale;
+  dataStore.selectedUnit.position.set(px, py, pz);
+  dataStore.selectedUnit.rotation.set(rx, ry, rz);
+  dataStore.selectedUnit.scale.set(scale, scale, scale);
+  dataStore.selectedUnit.userData.unitScale = scale;
   // 同步更新精灵位置
-  const sprite = unitLabelSprites.find(s => s.userData.parentUnit === selectedUnit);
+  const sprite = unitLabelSprites.find(s => s.userData.parentUnit === dataStore.selectedUnit);
   if (sprite) {
     sprite.position.set(px, py + sprite.userData.offsetY, pz);
   }
@@ -3217,7 +3167,7 @@ function applyTransform() {
 
 function updateCurrentModelInfo() {
   const el = document.getElementById('currentModelInfo'); if (!el) return;
-  const sd = getCurrentSceneData();
+  const sd = dataStore.getCurrentSceneData();
   if (sd?.model?.fileName) {
     el.textContent = sd.model.fileName; el.style.color = '#22c55e';
   } else {
