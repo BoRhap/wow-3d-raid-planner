@@ -7,6 +7,8 @@ import { DataStore } from './src/DataStore.js';
 import { SceneManager } from './src/SceneManager.js';
 import { ModelManager } from './src/ModelManager.js';
 import { ClipPlaneManager } from './src/ClipPlaneManager.js';
+import { UnitManager } from './src/UnitManager.js';
+import { AnnotationManager } from './src/AnnotationManager.js';
 
 // ============================================================
 //  WoW-Style 3D Raid Tactics Planner
@@ -31,10 +33,6 @@ let dragTarget = null;
 
 // ─── SCENE MANAGER ──────────────────────────────────────────
 const sceneManager = new SceneManager();
-
-const unitMeshes = [];
-const unitLabelSprites = [];
-const annotationMeshes = [];
 
 // ─── SIDEBAR STATE ─────────────────────────────────────────
 let sidebarCollapsed = false;
@@ -83,38 +81,7 @@ function saveCurrentViewpoint(name) {
 }
 
 // ─── CUSTOM ITEMS REGISTRY ────────────────────────────────
-const customItemsRegistry = {};
-let customItemsLoaded = false;
-
 // ─── LOAD CUSTOM ITEMS ──────────────────────────────────────
-async function loadCustomItems() {
-  if (customItemsLoaded) return;
-
-  for (const item of CUSTOM_ITEM_DEFS) {
-    try {
-      const texture = await new Promise((resolve, reject) => {
-        tgaLoader.load(`/src/icons/${item.filename}.tga`, resolve, undefined, reject);
-      });
-      texture.colorSpace = THREE.SRGBColorSpace;
-      texture.wrapS = THREE.ClampToEdgeWrapping;
-      texture.wrapT = THREE.ClampToEdgeWrapping;
-      texture.flipY = false;
-
-      customItemsRegistry[item.filename] = {
-        label: item.label,
-        icon: '🎒',
-        color: item.color,
-        texture: texture
-      };
-    } catch (err) {
-      console.warn(`加载 ${item.filename}.tga 失败:`, err);
-    }
-  }
-
-  customItemsLoaded = true;
-  console.log('自定义物品已加载:', Object.keys(customItemsRegistry));
-}
-
 // ─── DATA STORE ──────────────────────────────────────────────
 const dataStore = new DataStore([
   { id: 'raid1', name: '🏰 团队副本', collapsed: false, scenes: [
@@ -134,6 +101,8 @@ const clipPlaneManager = new ClipPlaneManager(sceneManager, modelManager);
 
 // ─── LOADERS ────────────────────────────────────────────────
 const tgaLoader = new TGALoader();
+const unitManager = new UnitManager(sceneManager, dataStore, modelManager, tgaLoader);
+const annotationManager = new AnnotationManager(sceneManager, dataStore, unitManager);
 
 // ─── INIT ───────────────────────────────────────────────────
 function init() {
@@ -154,11 +123,11 @@ function init() {
   });
 
   sceneManager.getRenderer().setAnimationLoop(() => {
-    sceneManager.animate(unitMeshes, annotationMeshes, dataStore.selectedUnit);
+    sceneManager.animate(unitManager.meshes, annotationManager.meshes, dataStore.selectedUnit);
   });
 
   // 加载自定义物品
-  loadCustomItems().then(() => {
+  unitManager.loadCustomItems().then(() => {
     populateCustomGrid();
   });
 }
@@ -170,466 +139,8 @@ function init() {
 // ─── ENVIRONMENT ────────────────────────────────────────────
 // ─── PHASES ─────────────────────────────────────────────────
 
-// ════════════════════════════════════════════════════════════
-//  Q版 CHIBI UNIT CREATION — CUTE ROUNDED STYLE
-// ════════════════════════════════════════════════════════════
-function getUnitDef(type) {
-  for (const cat of Object.values(UNIT_CATEGORIES)) {
-    if (cat.units && cat.units[type]) return cat.units[type];
-  }
-  if (customItemsRegistry[type]) {
-    return {
-      label: customItemsRegistry[type].label,
-      icon: customItemsRegistry[type].icon,
-      color: customItemsRegistry[type].color,
-      desc: '自定义物品'
-    };
-  }
-  return { label: type, icon: '❓', color: 0xaaaaaa, desc: '' };
-}
+// Unit creation is now handled by UnitManager
 
-function createChibiMesh(type, color, isMonster) {
-  const group = new THREE.Group();
-  const c = new THREE.Color(color);
-  const bodyMat = new THREE.MeshStandardMaterial({ color, roughness: 0.45, metalness: 0.15, emissive: color, emissiveIntensity: 0.15 });
-  const skinMat = new THREE.MeshStandardMaterial({ color: 0xfce4c8, roughness: 0.5, metalness: 0.05 });
-  const darkMat = new THREE.MeshStandardMaterial({ color: 0x222222, roughness: 0.4, metalness: 0.1 });
-  const whiteMat = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.3 });
-  const cheekMat = new THREE.MeshStandardMaterial({ color: 0xffaaaa, roughness: 0.6, transparent: true, opacity: 0.5 });
-
-  if (isMonster) {
-    // ─── MONSTER CHIBI ───
-    const isBoss = type === 'boss';
-    const isElite = type === 'elite';
-    const isSummoned = type === 'summoned';
-    const bodyScale = isBoss ? 1.3 : 1.0;
-
-    // Round body
-    const bodyGeo = new THREE.SphereGeometry(1.1 * bodyScale, 16, 12, 0, Math.PI * 2, 0, Math.PI * 0.85);
-    const monsterBodyMat = new THREE.MeshStandardMaterial({
-      color, roughness: 0.35, metalness: 0.2, emissive: color,
-      emissiveIntensity: isBoss ? 0.4 : isSummoned ? 0.5 : 0.2
-    });
-    const body = new THREE.Mesh(bodyGeo, monsterBodyMat);
-    body.position.y = 1.2 * bodyScale; body.castShadow = true; group.add(body);
-
-    // Big head
-    const headGeo = new THREE.SphereGeometry(0.85 * bodyScale, 16, 14);
-    const head = new THREE.Mesh(headGeo, monsterBodyMat);
-    head.position.y = 2.5 * bodyScale; head.castShadow = true; group.add(head);
-
-    // Eyes — angry slant
-    [-0.3, 0.3].forEach(xo => {
-      const eyeWhite = new THREE.Mesh(new THREE.SphereGeometry(0.2 * bodyScale, 10, 10), whiteMat);
-      eyeWhite.position.set(xo * bodyScale, 2.6 * bodyScale, 0.65 * bodyScale);
-      eyeWhite.scale.set(1, 0.8, 0.5); group.add(eyeWhite);
-      const pupil = new THREE.Mesh(new THREE.SphereGeometry(0.12 * bodyScale, 8, 8),
-        new THREE.MeshStandardMaterial({ color: isSummoned ? 0xaa00ff : 0xff2200, emissive: isSummoned ? 0xaa00ff : 0xff2200, emissiveIntensity: 0.8 }));
-      pupil.position.set(xo * bodyScale, 2.58 * bodyScale, 0.78 * bodyScale);
-      pupil.scale.set(1, 0.8, 0.5); group.add(pupil);
-    });
-
-    // Horns for boss
-    if (isBoss) {
-      const hornMat = new THREE.MeshStandardMaterial({ color: 0x440044, roughness: 0.3, metalness: 0.5 });
-      [-0.55, 0.55].forEach(xo => {
-        const horn = new THREE.Mesh(new THREE.ConeGeometry(0.12, 0.8, 6), hornMat);
-        horn.position.set(xo, 3.4, -0.1); horn.rotation.z = -xo * 0.5; horn.rotation.x = -0.2;
-        horn.castShadow = true; group.add(horn);
-      });
-    }
-
-    // Spikes for elite
-    if (isElite) {
-      const spikeMat = new THREE.MeshStandardMaterial({ color: 0xcc3333, emissive: 0xcc3333, emissiveIntensity: 0.3 });
-      for (let i = 0; i < 5; i++) {
-        const spike = new THREE.Mesh(new THREE.ConeGeometry(0.06, 0.4, 5), spikeMat);
-        const angle = (i / 5) * Math.PI * 2;
-        spike.position.set(Math.cos(angle) * 0.7, 3.1, Math.sin(angle) * 0.7);
-        spike.lookAt(new THREE.Vector3(Math.cos(angle) * 2, 3.5, Math.sin(angle) * 2));
-        group.add(spike);
-      }
-    }
-
-    // Summoned glow ring
-    if (isSummoned) {
-      const glowGeo = new THREE.TorusGeometry(1.0, 0.06, 8, 32);
-      const glowMat = new THREE.MeshBasicMaterial({ color: 0xaa44ff, transparent: true, opacity: 0.5 });
-      const ring = new THREE.Mesh(glowGeo, glowMat);
-      ring.rotation.x = -Math.PI / 2; ring.position.y = 0.5; group.add(ring);
-    }
-
-    // Monster Group (mobGroup) - 2 elite + 2 normal mini chibis
-    if (type === 'mobGroup') {
-      const miniScale = 1.05;
-      const eliteColor = 0xef4444;
-      const normalColor = 0xf97316;
-      const positions = [
-        { x: -1.4, z: -1.4, color: eliteColor, isElite: true },
-        { x: 1.4, z: -1.4, color: normalColor, isElite: false },
-        { x: -1.4, z: 1.4, color: normalColor, isElite: false },
-        { x: 1.4, z: 1.4, color: eliteColor, isElite: true },
-      ];
-      positions.forEach(({ x, z, color: mc, isElite: isMiniElite }) => {
-        const miniGroup = new THREE.Group();
-        const miniBodyMat = new THREE.MeshStandardMaterial({ color: mc, roughness: 0.35, metalness: 0.2, emissive: mc, emissiveIntensity: 0.2 });
-        // Mini body
-        const mBody = new THREE.Mesh(new THREE.SphereGeometry(0.5, 12, 8), miniBodyMat);
-        mBody.position.y = 0.5; miniGroup.add(mBody);
-        // Mini head
-        const mHead = new THREE.Mesh(new THREE.SphereGeometry(0.38, 12, 10), miniBodyMat);
-        mHead.position.y = 1.1; miniGroup.add(mHead);
-        // Mini eyes
-        [-0.15, 0.15].forEach(xo => {
-          const mEye = new THREE.Mesh(new THREE.SphereGeometry(0.08, 8, 8), whiteMat);
-          mEye.position.set(xo, 1.12, 0.3); miniGroup.add(mEye);
-          const mPupil = new THREE.Mesh(new THREE.SphereGeometry(0.05, 6, 6),
-            new THREE.MeshStandardMaterial({ color: 0xff2200, emissive: 0xff2200, emissiveIntensity: 0.8 }));
-          mPupil.position.set(xo, 1.1, 0.35); miniGroup.add(mPupil);
-        });
-        // Mini legs
-        [-0.18, 0.18].forEach(xo => {
-          const mLeg = new THREE.Mesh(new THREE.CapsuleGeometry(0.07, 0.2, 4, 6), miniBodyMat);
-          mLeg.position.set(xo, 0.12, 0); miniGroup.add(mLeg);
-        });
-        // Elite spikes
-        if (isMiniElite) {
-          const spikeMat = new THREE.MeshStandardMaterial({ color: 0xcc3333, emissive: 0xcc3333, emissiveIntensity: 0.3 });
-          for (let i = 0; i < 5; i++) {
-            const spike = new THREE.Mesh(new THREE.ConeGeometry(0.03, 0.2, 5), spikeMat);
-            const angle = (i / 5) * Math.PI * 2;
-            spike.position.set(Math.cos(angle) * 0.35, 1.35, Math.sin(angle) * 0.35);
-            spike.lookAt(new THREE.Vector3(Math.cos(angle) * 2, 1.6, Math.sin(angle) * 2));
-            miniGroup.add(spike);
-          }
-        }
-        miniGroup.scale.set(miniScale, miniScale, miniScale);
-        miniGroup.position.set(x, 0, z);
-        group.add(miniGroup);
-      });
-      return group;
-    }
-
-    // Tiny arms
-    [-0.9, 0.9].forEach(xo => {
-      const arm = new THREE.Mesh(new THREE.CapsuleGeometry(0.12 * bodyScale, 0.4 * bodyScale, 4, 8), monsterBodyMat);
-      arm.position.set(xo * bodyScale, 1.3 * bodyScale, 0);
-      arm.rotation.z = -xo * 0.4; arm.castShadow = true; group.add(arm);
-    });
-
-    // Tiny legs
-    [-0.35, 0.35].forEach(xo => {
-      const leg = new THREE.Mesh(new THREE.CapsuleGeometry(0.14 * bodyScale, 0.3 * bodyScale, 4, 8), monsterBodyMat);
-      leg.position.set(xo * bodyScale, 0.25 * bodyScale, 0); leg.castShadow = true; group.add(leg);
-    });
-
-    // Boss glow
-    if (isBoss) {
-      const glow = new THREE.PointLight(color, 1.2, 10); glow.position.y = 2; group.add(glow);
-      const baseRing = new THREE.Mesh(
-        new THREE.RingGeometry(1.4, 1.6, 32),
-        new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.4, side: THREE.DoubleSide })
-      );
-      baseRing.rotation.x = -Math.PI / 2; baseRing.position.y = 0.05; group.add(baseRing);
-    }
-
-    // Mouth — angry frown
-    const mouthGeo = new THREE.TorusGeometry(0.18 * bodyScale, 0.03, 8, 12, Math.PI);
-    const mouth = new THREE.Mesh(mouthGeo, darkMat);
-    mouth.position.set(0, 2.25 * bodyScale, 0.72 * bodyScale);
-    mouth.rotation.x = Math.PI; group.add(mouth);
-
-  } else {
-    // ─── PLAYER CHIBI ───
-    // Round body (tunic)
-    const bodyGeo = new THREE.SphereGeometry(0.85, 16, 12, 0, Math.PI * 2, 0, Math.PI * 0.85);
-    const body = new THREE.Mesh(bodyGeo, bodyMat);
-    body.position.y = 1.0; body.scale.y = 1.1; body.castShadow = true; group.add(body);
-
-    // Head (skin)
-    const headGeo = new THREE.SphereGeometry(0.65, 16, 14);
-    const head = new THREE.Mesh(headGeo, skinMat);
-    head.position.y = 2.15; head.castShadow = true; group.add(head);
-
-    // Hair
-    const hairColor = [0x3b2507, 0x8b6914, 0xc9510c, 0x1a1a2e, 0xd4a574, 0x6b3a2a][Math.floor(Math.random() * 6)];
-    const hairMat = new THREE.MeshStandardMaterial({ color: hairColor, roughness: 0.7 });
-    const hairGeo = new THREE.SphereGeometry(0.68, 14, 10, 0, Math.PI * 2, 0, Math.PI * 0.55);
-    const hair = new THREE.Mesh(hairGeo, hairMat);
-    hair.position.y = 2.3; group.add(hair);
-
-    // Eyes — big cute
-    [-0.22, 0.22].forEach(xo => {
-      const eyeWhite = new THREE.Mesh(new THREE.SphereGeometry(0.16, 10, 10), whiteMat);
-      eyeWhite.position.set(xo, 2.22, 0.52); eyeWhite.scale.set(1, 1.2, 0.5); group.add(eyeWhite);
-      const pupil = new THREE.Mesh(new THREE.SphereGeometry(0.1, 8, 8), darkMat);
-      pupil.position.set(xo, 2.2, 0.6); pupil.scale.set(1, 1.2, 0.5); group.add(pupil);
-      // Highlight
-      const hl = new THREE.Mesh(new THREE.SphereGeometry(0.04, 6, 6), whiteMat);
-      hl.position.set(xo + 0.05, 2.27, 0.62); group.add(hl);
-    });
-
-    // Blush cheeks
-    [-0.35, 0.35].forEach(xo => {
-      const cheek = new THREE.Mesh(new THREE.SphereGeometry(0.1, 8, 8), cheekMat);
-      cheek.position.set(xo, 2.05, 0.55); cheek.scale.set(1.2, 0.8, 0.5); group.add(cheek);
-    });
-
-    // Smile
-    const smileGeo = new THREE.TorusGeometry(0.1, 0.02, 8, 12, Math.PI);
-    const smile = new THREE.Mesh(smileGeo, darkMat);
-    smile.position.set(0, 2.0, 0.58); smile.rotation.z = Math.PI; group.add(smile);
-
-    // Arms (tiny)
-    [-0.72, 0.72].forEach(xo => {
-      const arm = new THREE.Mesh(new THREE.CapsuleGeometry(0.1, 0.35, 4, 8), skinMat);
-      arm.position.set(xo, 1.1, 0); arm.rotation.z = -xo * 0.35; arm.castShadow = true; group.add(arm);
-    });
-
-    // Legs
-    [-0.25, 0.25].forEach(xo => {
-      const leg = new THREE.Mesh(new THREE.CapsuleGeometry(0.11, 0.3, 4, 8), bodyMat);
-      leg.position.set(xo, 0.22, 0); leg.castShadow = true; group.add(leg);
-      const shoe = new THREE.Mesh(new THREE.SphereGeometry(0.12, 8, 6), darkMat);
-      shoe.position.set(xo, 0.05, 0.04); shoe.scale.set(1, 0.7, 1.3); group.add(shoe);
-    });
-
-    // Class-specific accessories
-    addClassAccessories(group, type, c, bodyMat);
-
-    // Base ring (class color)
-    const baseRing = new THREE.Mesh(
-      new THREE.RingGeometry(0.65, 0.75, 24),
-      new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.5, side: THREE.DoubleSide })
-    );
-    baseRing.rotation.x = -Math.PI / 2; baseRing.position.y = 0.05; group.add(baseRing);
-  }
-
-  return group;
-}
-
-function addClassAccessories(group, type, color, bodyMat) {
-  const accentMat = new THREE.MeshStandardMaterial({ color: color.clone().multiplyScalar(0.8), roughness: 0.35, metalness: 0.4 });
-
-  switch (type) {
-    case 'tank': case 'warrior': case 'deathknight': {
-      // Shield on back
-      const shieldGeo = new THREE.CylinderGeometry(0.35, 0.35, 0.06, 6);
-      const shieldMat = new THREE.MeshStandardMaterial({ color: 0x6688bb, roughness: 0.2, metalness: 0.7 });
-      const shield = new THREE.Mesh(shieldGeo, shieldMat);
-      shield.position.set(-0.55, 1.3, -0.2); shield.rotation.z = Math.PI / 2; group.add(shield);
-      // Sword
-      const sword = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.8, 0.03),
-        new THREE.MeshStandardMaterial({ color: 0xcccccc, metalness: 0.8, roughness: 0.1 }));
-      sword.position.set(0.6, 1.4, -0.15); sword.rotation.z = 0.3; group.add(sword);
-      break;
-    }
-    case 'healer': case 'priest': {
-      // Halo
-      const haloGeo = new THREE.TorusGeometry(0.35, 0.04, 8, 24);
-      const haloMat = new THREE.MeshStandardMaterial({ color: 0xffdd44, emissive: 0xffdd44, emissiveIntensity: 0.6 });
-      const halo = new THREE.Mesh(haloGeo, haloMat);
-      halo.position.y = 3.0; halo.rotation.x = -Math.PI / 2; group.add(halo);
-      // Glow
-      const gl = new THREE.PointLight(0x44ff88, 0.5, 6); gl.position.y = 2.5; group.add(gl);
-      break;
-    }
-    case 'dps': case 'rogue': {
-      // Dual daggers
-      [-0.5, 0.5].forEach(xo => {
-        const dagger = new THREE.Mesh(new THREE.ConeGeometry(0.04, 0.5, 4),
-          new THREE.MeshStandardMaterial({ color: 0xaaaacc, metalness: 0.8, roughness: 0.1 }));
-        dagger.position.set(xo * 1.1, 0.8, 0.1); dagger.rotation.z = xo * 0.6; group.add(dagger);
-      });
-      break;
-    }
-    case 'paladin': {
-      // Glowing hammer
-      const hamHead = new THREE.Mesh(new THREE.BoxGeometry(0.2, 0.15, 0.3),
-        new THREE.MeshStandardMaterial({ color: 0xf0c060, metalness: 0.6, roughness: 0.2 }));
-      hamHead.position.set(0.65, 1.8, -0.1); group.add(hamHead);
-      const hamHandle = new THREE.Mesh(new THREE.CylinderGeometry(0.03, 0.03, 0.6, 6),
-        new THREE.MeshStandardMaterial({ color: 0x8b6914, roughness: 0.6 }));
-      hamHandle.position.set(0.65, 1.4, -0.1); group.add(hamHandle);
-      const gl = new THREE.PointLight(0xffcc44, 0.4, 5); gl.position.set(0.65, 1.8, 0); group.add(gl);
-      break;
-    }
-    case 'hunter': {
-      // Bow
-      const bowGeo = new THREE.TorusGeometry(0.35, 0.03, 6, 12, Math.PI);
-      const bow = new THREE.Mesh(bowGeo, new THREE.MeshStandardMaterial({ color: 0x8b6914, roughness: 0.5 }));
-      bow.position.set(-0.55, 1.5, 0); bow.rotation.y = Math.PI / 2; group.add(bow);
-      // Pet paw mark
-      const pawMat = new THREE.MeshBasicMaterial({ color: 0xabd473, transparent: true, opacity: 0.4, side: THREE.DoubleSide });
-      const paw = new THREE.Mesh(new THREE.CircleGeometry(0.2, 8), pawMat);
-      paw.rotation.x = -Math.PI / 2; paw.position.set(0.6, 0.06, 0.4); group.add(paw);
-      break;
-    }
-    case 'shaman': {
-      // Totems
-      const totemMat = new THREE.MeshStandardMaterial({ color: 0x0070de, emissive: 0x0070de, emissiveIntensity: 0.3 });
-      for (let i = 0; i < 3; i++) {
-        const t = new THREE.Mesh(new THREE.CylinderGeometry(0.06, 0.08, 0.3, 6), totemMat);
-        t.position.set(-0.5 + i * 0.4, 0.15, 0.65); group.add(t);
-      }
-      break;
-    }
-    case 'druid': {
-      // Leaf crown
-      const leafMat = new THREE.MeshStandardMaterial({ color: 0x44aa22, emissive: 0x228800, emissiveIntensity: 0.2 });
-      for (let i = 0; i < 6; i++) {
-        const angle = (i / 6) * Math.PI * 2;
-        const leaf = new THREE.Mesh(new THREE.SphereGeometry(0.08, 6, 4), leafMat);
-        leaf.position.set(Math.cos(angle) * 0.45, 2.7, Math.sin(angle) * 0.45);
-        leaf.scale.set(1.5, 0.6, 1); group.add(leaf);
-      }
-      break;
-    }
-    case 'mage': {
-      // Staff with orb
-      const staff = new THREE.Mesh(new THREE.CylinderGeometry(0.03, 0.03, 1.2, 6),
-        new THREE.MeshStandardMaterial({ color: 0x6644aa, roughness: 0.4 }));
-      staff.position.set(0.65, 1.2, -0.1); group.add(staff);
-      const orb = new THREE.Mesh(new THREE.SphereGeometry(0.12, 10, 10),
-        new THREE.MeshStandardMaterial({ color: 0x69ccf0, emissive: 0x69ccf0, emissiveIntensity: 0.7, transparent: true, opacity: 0.8 }));
-      orb.position.set(0.65, 1.9, -0.1); group.add(orb);
-      const gl = new THREE.PointLight(0x69ccf0, 0.6, 5); gl.position.set(0.65, 1.9, 0); group.add(gl);
-      break;
-    }
-    case 'warlock': {
-      // Demonic flame
-      const flameMat = new THREE.MeshStandardMaterial({ color: 0x9482c9, emissive: 0x6633aa, emissiveIntensity: 0.5, transparent: true, opacity: 0.7 });
-      const flame = new THREE.Mesh(new THREE.ConeGeometry(0.15, 0.4, 6), flameMat);
-      flame.position.set(0, 3.1, 0); group.add(flame);
-      // Dark circle
-      const darkCircle = new THREE.Mesh(
-        new THREE.RingGeometry(0.55, 0.65, 16),
-        new THREE.MeshBasicMaterial({ color: 0x6633aa, transparent: true, opacity: 0.3, side: THREE.DoubleSide })
-      );
-      darkCircle.rotation.x = -Math.PI / 2; darkCircle.position.y = 0.06; group.add(darkCircle);
-      break;
-    }
-  }
-}
-
-function createUnitMesh(type, x, z, label, unitScale) {
-  const def = getUnitDef(type);
-  const isMonster = !!UNIT_CATEGORIES.monsters.units[type];
-  const group = createChibiMesh(type, def.color, isMonster);
-  group.name = `unit_${type}_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`;
-
-  group.position.set(x, 0, z);
-  const s = unitScale !== undefined ? unitScale : 0.1;
-  group.scale.set(s, s, s);
-  group.userData = { type, label: label || def.label, role: type, isUnit: true, unitScale: s, isMonster };
-  sceneManager.getScene().add(group);
-  unitMeshes.push(group);
-
-  // Label sprite - 作为独立对象添加到场景
-  const labelText = label || (def.icon + ' ' + def.label);
-  const sprite = createTextSprite(labelText, def.color);
-  const spriteOffsetY = 0.5;
-  sprite.position.set(x, group.position.y + spriteOffsetY, z);
-  sprite.userData.parentUnit = group;
-  sprite.userData.offsetY = spriteOffsetY;
-  sceneManager.getScene().add(sprite);
-  unitLabelSprites.push(sprite);
-
-  return group;
-}
-
-function createCustomMesh(type, x, z, label, unitScale) {
-  const item = customItemsRegistry[type];
-  if (!item) {
-    console.error(`自定义物品未找到: ${type}`);
-    return null;
-  }
-
-  // 正方体尺寸
-  const sizeX = 2;
-  const sizeY = 0.5;
-  const sizeZ = 2;
-
-  const geometry = new THREE.BoxGeometry(sizeX, sizeY, sizeZ);
-
-  // 纹理工料 - 顶面应用TGA纹理，其他面使用纯色
-  const textureMaterial = new THREE.MeshStandardMaterial({
-    map: item.texture,
-    transparent: true,
-    roughness: 0.7,
-    metalness: 0.1
-  });
-  const sideColor = new THREE.Color(item.color).multiplyScalar(0.6);
-  const sideMaterial = new THREE.MeshStandardMaterial({
-    color: sideColor,
-    roughness: 0.8,
-    metalness: 0.1
-  });
-
-  // 材质数组: 左右上下前后 - 纹理朝上
-  // BoxGeometry顺序: +x, -x, +y, -y, +z, -z
-  // +y (index 2) 是顶面，应用纹理
-  const materials = [
-    sideMaterial,           // 右
-    sideMaterial,           // 左
-    textureMaterial,        // 上 (应用TGA纹理，朝上)
-    sideMaterial,           // 下
-    sideMaterial,           // 前
-    sideMaterial            // 后
-  ];
-
-  const mesh = new THREE.Mesh(geometry, materials);
-  mesh.name = `unit_${type}_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`;
-  mesh.position.set(x, sizeY / 2, z);  // 底部接地
-
-  const s = unitScale !== undefined ? unitScale : 0.1;
-  mesh.scale.set(s, s, s);
-
-  const labelText = label || item.label;
-  mesh.userData = {
-    type: type,
-    label: labelText,
-    role: type,
-    isUnit: true,
-    isCustom: true,
-    unitScale: s,
-    isMonster: false
-  };
-
-  sceneManager.getScene().add(mesh);
-  unitMeshes.push(mesh);
-
-  // Label sprite - 作为独立对象添加到场景
-  const sprite = createTextSprite(labelText, item.color);
-  const spriteOffsetY = 0.5;
-  sprite.position.set(x, mesh.position.y + spriteOffsetY, z);
-  sprite.userData.parentUnit = mesh;
-  sprite.userData.offsetY = spriteOffsetY;
-  sceneManager.getScene().add(sprite);
-  unitLabelSprites.push(sprite);
-
-  return mesh;
-}
-
-function createTextSprite(text, color) {
-  const canvas = document.createElement('canvas');
-  const ctx = canvas.getContext('2d');
-  canvas.width = 1024; canvas.height = 256;
-  ctx.clearRect(0, 0, 1024, 256);
-  ctx.font = 'bold 72px "Inter", Arial, sans-serif';
-  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-  ctx.shadowColor = 'rgba(0,0,0,0.9)'; ctx.shadowBlur = 4;
-  ctx.shadowOffsetX = 1; ctx.shadowOffsetY = 1;
-  const hex = typeof color === 'number' ? '#' + color.toString(16).padStart(6, '0') : color;
-  ctx.fillStyle = hex;
-  ctx.fillText(text, 512, 128);
-  const tex = new THREE.CanvasTexture(canvas); tex.needsUpdate = true;
-  const mat = new THREE.SpriteMaterial({ map: tex, transparent: true, depthTest: false, depthWrite: false });
-  const sprite = new THREE.Sprite(mat);
-  sprite.scale.set(0.5, 0.125, 1);
-  sprite.renderOrder = 999; // 确保始终最后渲染，在其他物体之上
-  return sprite;
-}
 
 // ─── ANNOTATION EDIT PANEL ──────────────────────────────────
 function showAnnotationEditPanel(annotation, screenX, screenY) {
@@ -700,7 +211,7 @@ function applyAnnotationEdit(type) {
       const sprite = annotation.children.find(c => c.isSprite);
       if (sprite && sprite.material && sprite.material.map) {
         annotation.remove(sprite);
-        const newSprite = createTextSprite(annotation.userData.label || '', newColor);
+        const newSprite = unitManager.createTextSprite(annotation.userData.label || '', newColor);
         newSprite.position.set(annotation.userData.center.x, annotation.userData.center.y + 0.3, annotation.userData.center.z);
         newSprite.scale.set(0.6, 0.15, 1);
         annotation.add(newSprite);
@@ -714,7 +225,7 @@ function applyAnnotationEdit(type) {
       // Remove old sprite and create new one
       const oldSprite = annotation.children.find(c => c.isSprite);
       if (oldSprite) annotation.remove(oldSprite);
-      const newSprite = createTextSprite('📌 ' + newText, '#ffffff');
+      const newSprite = unitManager.createTextSprite('📌 ' + newText, '#ffffff');
       newSprite.position.set(annotation.userData.pos.x, annotation.userData.pos.y + 0.3, annotation.userData.pos.z);
       newSprite.scale.set(0.9, 0.22, 1);
       annotation.add(newSprite);
@@ -738,104 +249,25 @@ function setEditColor(color, type) {
 window.applyAnnotationEdit = applyAnnotationEdit;
 window.setEditColor = setEditColor;
 
-// ─── ANNOTATIONS ────────────────────────────────────────────
-function createArrowAnnotation(start, end, color) {
-  const group = new THREE.Group(); group.name = `arrow_${Date.now()}`;
-  const dir = new THREE.Vector3().subVectors(end, start);
-  const len = dir.length();
-  if (len < 0.01) return group; // points too close
-  dir.normalize();
-
-  const s = 0.2; // scale factor
-  const arrowColor = color || 0xfbbf24;
-
-  // Scaled dimensions
-  const shaftRadius = 0.2 * s * 0.5;  // 0.04 * 0.5 = 0.02
-  const headRadius = 0.8 * s * 0.5;   // 0.16 * 0.5 = 0.08
-  const headHeight = 1.5 * s;    // 0.3
-
-  // Shaft: from start to (end - dir * headHeight), if there's room
-  const shaftEndWorld = new THREE.Vector3().copy(end).addScaledVector(dir, -headHeight);
-  const shaftLen = Math.max(0, shaftEndWorld.distanceTo(start));
-
-  if (shaftLen > 0.05) {
-    // Shaft center is midpoint between start and shaftEndWorld
-    const shaftMidWorld = new THREE.Vector3().addVectors(start, shaftEndWorld).multiplyScalar(0.5);
-    const shaftGeo = new THREE.CylinderGeometry(shaftRadius, shaftRadius, shaftLen, 12);
-    const shaftMat = new THREE.MeshBasicMaterial({ color: arrowColor, transparent: true, opacity: 0.9 });
-    const shaft = new THREE.Mesh(shaftGeo, shaftMat);
-    shaft.position.copy(shaftMidWorld);
-    const shaftQuat = new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 1, 0), dir);
-    shaft.quaternion.copy(shaftQuat);
-    group.add(shaft);
-  }
-
-  // Head: tip at end, base faces start
-  // ConeGeometry: tip at +Y, base at -Y
-  // After rotation with (0,1,0)->dir: tip at +dir, base at -dir
-  // We want tip at end, so position head at end - dir * headHeight/2
-  const headGeo = new THREE.ConeGeometry(headRadius, headHeight, 12);
-  const headMat = new THREE.MeshBasicMaterial({ color: arrowColor });
-  const head = new THREE.Mesh(headGeo, headMat);
-  head.position.copy(end).addScaledVector(dir, -headHeight / 2);
-  const headQuat = new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 1, 0), dir);
-  head.quaternion.copy(headQuat);
-  group.add(head);
-
-  group.userData = { isAnnotation: true, annotationType: 'arrow', start: start.clone(), end: end.clone(), color: arrowColor };
-  group.position.y -= 0.2;  // Y轴高度下降0.2
-  sceneManager.getScene().add(group); annotationMeshes.push(group); return group;
-}
-
-function createZoneAnnotation(center, radius, color, label) {
-  const group = new THREE.Group(); group.name = `zone_${Date.now()}`;
-  const c = color || 0xef4444;
-  const circGeo = new THREE.CircleGeometry(radius * 0.2, 48);
-  const circMat = new THREE.MeshBasicMaterial({ color: c, transparent: true, opacity: 0.18, side: THREE.DoubleSide });
-  const circ = new THREE.Mesh(circGeo, circMat); circ.rotation.x = -Math.PI / 2; circ.position.set(center.x, center.y + 0.08, center.z); group.add(circ);
-  const ringGeo = new THREE.RingGeometry(radius * 0.2 - 0.02, radius * 0.2, 48);
-  const ringMat = new THREE.MeshBasicMaterial({ color: c, transparent: true, opacity: 0.6, side: THREE.DoubleSide });
-  const ring = new THREE.Mesh(ringGeo, ringMat); ring.rotation.x = -Math.PI / 2; ring.position.set(center.x, center.y + 0.1, center.z); group.add(ring);
-  const pulseGeo = new THREE.RingGeometry(radius * 0.2, radius * 0.2 + 0.03, 48);
-  const pulseMat = new THREE.MeshBasicMaterial({ color: c, transparent: true, opacity: 0.3, side: THREE.DoubleSide });
-  const pulse = new THREE.Mesh(pulseGeo, pulseMat); pulse.rotation.x = -Math.PI / 2; pulse.position.set(center.x, center.y + 0.09, center.z); pulse.userData.pulse = true; group.add(pulse);
-  if (label) { const sprite = createTextSprite(label, c); sprite.position.set(center.x, center.y + 0.3, center.z); sprite.scale.set(0.6, 0.15, 1); group.add(sprite); }
-  group.userData = { isAnnotation: true, annotationType: 'zone', center: center.clone(), radius, color: c, label };
-  sceneManager.getScene().add(group); annotationMeshes.push(group); return group;
-}
-
-function createLabelAnnotation(position, text) {
-  const group = new THREE.Group(); group.name = `label_${Date.now()}`;
-  const sprite = createTextSprite('📌 ' + text, '#ffffff');
-  sprite.position.set(position.x, position.y + 0.3, position.z); sprite.scale.set(0.9, 0.22, 1); group.add(sprite);
-  const pinH = position.y + 0.01;
-  const pin = new THREE.Mesh(new THREE.CylinderGeometry(0.01, 0.01, pinH, 8), new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.4 }));
-  pin.position.set(position.x, pinH / 2, position.z); group.add(pin);
-  const dot = new THREE.Mesh(new THREE.SphereGeometry(0.024, 8, 8), new THREE.MeshBasicMaterial({ color: 0xfbbf24 }));
-  dot.position.set(position.x, position.y + 0.01, position.z); group.add(dot);
-  group.userData = { isAnnotation: true, annotationType: 'label', text, pos: position.clone() };
-  sceneManager.getScene().add(group); annotationMeshes.push(group); return group;
-}
-
 // ─── SAVE / LOAD ────────────────────────────────────────────
 function saveCurrentState() {
-  dataStore.savePhaseState(unitMeshes, annotationMeshes);
+  dataStore.savePhaseState(unitManager.meshes, annotationManager.meshes);
 }
 
 function clearSceneObjects() {
-  unitMeshes.forEach(m => sceneManager.getScene().remove(m)); unitMeshes.length = 0;
-  unitLabelSprites.forEach(s => sceneManager.getScene().remove(s)); unitLabelSprites.length = 0;
-  annotationMeshes.forEach(a => sceneManager.getScene().remove(a)); annotationMeshes.length = 0;
+  unitManager.meshes.forEach(m => sceneManager.getScene().remove(m)); unitManager.meshes.length = 0;
+  unitManager.labelSprites.forEach(s => sceneManager.getScene().remove(s)); unitManager.labelSprites.length = 0;
+  annotationManager.clearAll();
 }
 
 function loadPhaseState(phase) {
   clearSceneObjects();
   if (phase.units) phase.units.forEach(u => {
     let mesh;
-    if (customItemsRegistry[u.type]) {
-      mesh = createCustomMesh(u.type, u.x, u.z, u.label, u.unitScale);
+    if (unitManager.customItemsRegistry[u.type]) {
+      mesh = unitManager.createCustomMesh(u.type, u.x, u.z, u.label, u.unitScale);
     } else {
-      mesh = createUnitMesh(u.type, u.x, u.z, u.label, u.unitScale);
+      mesh = unitManager.createUnitMesh(u.type, u.x, u.z, u.label, u.unitScale);
     }
     mesh.name = u.name;
     if (u.y !== undefined && u.y !== 0) mesh.position.y = u.y;
@@ -844,16 +276,16 @@ function loadPhaseState(phase) {
     if (u.ry !== undefined) mesh.rotation.y = u.ry;
     if (u.rz !== undefined) mesh.rotation.z = u.rz;
     // 同步sprite位置，确保sprite在mesh上方且不低于最小高度
-    const sprite = unitLabelSprites.find(s => s.userData.parentUnit === mesh);
+    const sprite = unitManager.labelSprites.find(s => s.userData.parentUnit === mesh);
     if (sprite) {
       const targetY = Math.max(mesh.position.y + sprite.userData.offsetY, 0.5);
       sprite.position.set(mesh.position.x, targetY, mesh.position.z);
     }
   });
   if (phase.annotations) phase.annotations.forEach(a => {
-    if (a.type === 'arrow' && a.start && a.end) createArrowAnnotation(new THREE.Vector3(a.start.x, a.start.y || 0, a.start.z), new THREE.Vector3(a.end.x, a.end.y || 0, a.end.z), a.color);
-    else if (a.type === 'zone' && a.center) createZoneAnnotation(new THREE.Vector3(a.center.x, a.center.y || 0, a.center.z), a.radius, a.color, a.label);
-    else if (a.type === 'label' && a.pos) createLabelAnnotation(new THREE.Vector3(a.pos.x, a.pos.y || 0, a.pos.z), a.text);
+    if (a.type === 'arrow' && a.start && a.end) annotationManager.createArrowAnnotation(new THREE.Vector3(a.start.x, a.start.y || 0, a.start.z), new THREE.Vector3(a.end.x, a.end.y || 0, a.end.z), a.color);
+    else if (a.type === 'zone' && a.center) annotationManager.createZoneAnnotation(new THREE.Vector3(a.center.x, a.center.y || 0, a.center.z), a.radius, a.color, a.label);
+    else if (a.type === 'label' && a.pos) annotationManager.createLabelAnnotation(new THREE.Vector3(a.pos.x, a.pos.y || 0, a.pos.z), a.text);
   });
 }
 
@@ -971,16 +403,16 @@ function animatePhaseTransition(oldP, newP, callback) {
   animating = true; const duration = 1.2; let elapsed = 0;
   const pairs = [];
   if (newP.units) newP.units.forEach(nu => {
-    const existing = unitMeshes.find(m => m.name === nu.name);
+    const existing = unitManager.meshes.find(m => m.name === nu.name);
     if (existing) {
       const toY = nu.y !== undefined ? nu.y : modelManager.getModelSurfaceHeight(nu.x, nu.z);
       pairs.push({ mesh: existing, from: { x: existing.position.x, y: existing.position.y, z: existing.position.z }, to: { x: nu.x, y: toY, z: nu.z } });
     }
   });
-  const existingNames = unitMeshes.map(m => m.name);
+  const existingNames = unitManager.meshes.map(m => m.name);
   const toAdd = (newP.units || []).filter(nu => !existingNames.includes(nu.name));
   const newNames = (newP.units || []).map(nu => nu.name);
-  const toRemove = unitMeshes.filter(m => !newNames.includes(m.name));
+  const toRemove = unitManager.meshes.filter(m => !newNames.includes(m.name));
 
   function frame() {
     elapsed += sceneManager.getClock().getDelta();
@@ -992,47 +424,36 @@ function animatePhaseTransition(oldP, newP, callback) {
       const baseY = p.from.y + (p.to.y - p.from.y) * ease;
       const midY = modelManager.getModelSurfaceHeight(p.mesh.position.x, p.mesh.position.z);
       p.mesh.position.y = Math.max(baseY, midY) + Math.sin(ease * Math.PI) * 2.0;
-      // 同步更新精灵位置
-      const sprite = unitLabelSprites.find(s => s.userData.parentUnit === p.mesh);
-      if (sprite) {
-        sprite.position.set(p.mesh.position.x, p.mesh.position.y + sprite.userData.offsetY, p.mesh.position.z);
-      }
+      unitManager.updateUnitSprite(p.mesh);
     });
     toRemove.forEach(m => m.scale.setScalar((1 - ease) * (m.userData.unitScale || 0.1)));
     pairs.forEach(p => { if (t > 0.05 && t < 0.95 && Math.random() < 0.3) createTrailParticle(p.mesh.position); });
     sceneManager.getControls().update(); sceneManager.getRenderer().render(sceneManager.getScene(), sceneManager.getCamera());
     if (t >= 1) {
       toRemove.forEach(m => {
-        sceneManager.getScene().remove(m); const idx = unitMeshes.indexOf(m); if (idx > -1) unitMeshes.splice(idx, 1);
-        const spriteIdx = unitLabelSprites.findIndex(s => s.userData.parentUnit === m);
-        if (spriteIdx > -1) { sceneManager.getScene().remove(unitLabelSprites[spriteIdx]); unitLabelSprites.splice(spriteIdx, 1); }
+        sceneManager.getScene().remove(m); const idx = unitManager.meshes.indexOf(m); if (idx > -1) unitManager.meshes.splice(idx, 1);
+        const spriteIdx = unitManager.labelSprites.findIndex(s => s.userData.parentUnit === m);
+        if (spriteIdx > -1) { sceneManager.getScene().remove(unitManager.labelSprites[spriteIdx]); unitManager.labelSprites.splice(spriteIdx, 1); }
       });
       toAdd.forEach(nu => {
-        const m = createUnitMesh(nu.type, nu.x, nu.z, nu.label, nu.unitScale);
+        const m = unitManager.createUnitMesh(nu.type, nu.x, nu.z, nu.label, nu.unitScale);
         m.position.y = nu.y !== undefined ? nu.y : modelManager.getModelSurfaceHeight(nu.x, nu.z);
         if (nu.rx !== undefined) m.rotation.x = nu.rx;
         if (nu.ry !== undefined) m.rotation.y = nu.ry;
         if (nu.rz !== undefined) m.rotation.z = nu.rz;
-        // 同步sprite位置
-        const sprite = unitLabelSprites.find(s => s.userData.parentUnit === m);
-        if (sprite) {
-          sprite.position.set(m.position.x, m.position.y + sprite.userData.offsetY, m.position.z);
-        }
+        unitManager.updateUnitSprite(m);
       });
       pairs.forEach(p => {
         p.mesh.position.y = p.to.y;
-        const sprite = unitLabelSprites.find(s => s.userData.parentUnit === p.mesh);
-        if (sprite) {
-          sprite.position.set(p.to.x, p.to.y + sprite.userData.offsetY, p.to.z);
-        }
+        unitManager.updateUnitSprite(p.mesh);
       });
-      annotationMeshes.forEach(a => sceneManager.getScene().remove(a)); annotationMeshes.length = 0;
+      annotationManager.clearAll();
       if (newP.annotations) newP.annotations.forEach(a => {
-        if (a.type === 'arrow' && a.start && a.end) createArrowAnnotation(new THREE.Vector3(a.start.x, a.start.y || 0, a.start.z), new THREE.Vector3(a.end.x, a.end.y || 0, a.end.z), a.color);
-        else if (a.type === 'zone' && a.center) createZoneAnnotation(new THREE.Vector3(a.center.x, a.center.y || 0, a.center.z), a.radius, a.color, a.label);
-        else if (a.type === 'label' && a.pos) createLabelAnnotation(new THREE.Vector3(a.pos.x, a.pos.y || 0, a.pos.z), a.text);
+        if (a.type === 'arrow' && a.start && a.end) annotationManager.createArrowAnnotation(new THREE.Vector3(a.start.x, a.start.y || 0, a.start.z), new THREE.Vector3(a.end.x, a.end.y || 0, a.end.z), a.color);
+        else if (a.type === 'zone' && a.center) annotationManager.createZoneAnnotation(new THREE.Vector3(a.center.x, a.center.y || 0, a.center.z), a.radius, a.color, a.label);
+        else if (a.type === 'label' && a.pos) annotationManager.createLabelAnnotation(new THREE.Vector3(a.pos.x, a.pos.y || 0, a.pos.z), a.text);
       });
-      animating = false; sceneManager.getRenderer().setAnimationLoop(() => sceneManager.animate(unitMeshes, annotationMeshes, dataStore.selectedUnit));
+      animating = false; sceneManager.getRenderer().setAnimationLoop(() => sceneManager.animate(unitManager.meshes, annotationManager.meshes, dataStore.selectedUnit));
       if (callback) callback(); return;
     }
     sceneManager.getRenderer().setAnimationLoop(frame);
@@ -1118,7 +539,7 @@ function getUnitIntersect(event) {
   mouse.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
   mouse.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
   raycaster.setFromCamera(mouse, sceneManager.getCamera());
-  const hits = raycaster.intersectObjects(unitMeshes, true);
+  const hits = raycaster.intersectObjects(unitManager.meshes, true);
   if (hits.length > 0) {
     let obj = hits[0].object;
     while (obj && obj !== sceneManager.getScene() && !obj.userData.isUnit) obj = obj.parent;
@@ -1132,7 +553,7 @@ function getAnnotationIntersect(event) {
   mouse.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
   mouse.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
   raycaster.setFromCamera(mouse, sceneManager.getCamera());
-  const hits = raycaster.intersectObjects(annotationMeshes, true);
+  const hits = raycaster.intersectObjects(annotationManager.meshes, true);
   if (hits.length > 0) {
     let obj = hits[0].object;
     while (obj && obj !== sceneManager.getScene() && !obj.userData.isAnnotation) obj = obj.parent;
@@ -1150,7 +571,7 @@ function bindEvents() {
   sceneManager.getRenderer().domElement.addEventListener('mouseup', onMouseUp);
   sceneManager.getRenderer().domElement.addEventListener('contextmenu', (e) => {
     e.preventDefault(); dataStore.selectedUnit = null; dataStore.selectedAnnotation = null; dataStore.placementMode = null; arrowStart = null;
-    updateToolbarSelection(); clearSelectionVisuals(); clearAnnotationSelection(); hideAnnotationEditPanel();
+    updateToolbarSelection(); unitManager.clearSelectionVisuals(); clearAnnotationSelection(); hideAnnotationEditPanel();
   });
   window.addEventListener('resize', onResize);
   window.addEventListener('keydown', onKeyDown);
@@ -1178,32 +599,28 @@ function onCanvasClick(e) {
       const label = labelInput?.value || '';
       let mesh;
       if (UNIT_CATEGORIES.custom.units[dataStore.placementMode]) {
-        mesh = createCustomMesh(dataStore.placementMode, point.x, point.z, label || undefined);
+        mesh = unitManager.createCustomMesh(dataStore.placementMode, point.x, point.z, label || undefined);
       } else {
-        mesh = createUnitMesh(dataStore.placementMode, point.x, point.z, label || undefined);
+        mesh = unitManager.createUnitMesh(dataStore.placementMode, point.x, point.z, label || undefined);
       }
       mesh.position.y = point.y || 0;
-      // 同步精灵位置
-      const sprite = unitLabelSprites.find(s => s.userData.parentUnit === mesh);
-      if (sprite) {
-        sprite.position.set(mesh.position.x, mesh.position.y + sprite.userData.offsetY, mesh.position.z);
-      }
-      const def = getUnitDef(dataStore.placementMode);
+      unitManager.updateUnitSprite(mesh);
+      const def = unitManager.getUnitDef(dataStore.placementMode);
       showToast(`✅ 已放置 ${def.icon} ${def.label}`);
     } else if (dataStore.placementMode === 'arrow') {
       if (!arrowStart) { arrowStart = point.clone(); arrowStart.y += 0.3; showToast('📍 点击第二个点完成箭头'); }
       else {
         const endPoint = point.clone(); endPoint.y += 0.3;
-        createArrowAnnotation(arrowStart, endPoint); arrowStart = null; showToast('✅ 箭头已添加');
+        annotationManager.createArrowAnnotation(arrowStart, endPoint); arrowStart = null; showToast('✅ 箭头已添加');
       }
     } else if (dataStore.placementMode === 'zone') {
       const radius = parseFloat(document.getElementById('zoneRadiusInput')?.value) || 4;
       const zoneLabel = document.getElementById('zoneLabelInput')?.value || '危险区域';
       const zoneColor = parseInt(document.getElementById('zoneColorInput')?.value?.replace('#', ''), 16) || 0xef4444;
-      createZoneAnnotation(point, radius, zoneColor, zoneLabel); showToast('✅ 区域标记已添加');
+      annotationManager.createZoneAnnotation(point, radius, zoneColor, zoneLabel); showToast('✅ 区域标记已添加');
     } else if (dataStore.placementMode === 'label') {
       const text = document.getElementById('annotationTextInput')?.value || '标记点';
-      createLabelAnnotation(point, text); showToast('✅ 标签已添加');
+      annotationManager.createLabelAnnotation(point, text); showToast('✅ 标签已添加');
     }
     updateUnitList(); return;
   }
@@ -1217,8 +634,8 @@ function onCanvasClick(e) {
     window.currentSelectedAnnotation = annotation;
     showAnnotationEditPanel(annotation, e.clientX, e.clientY);
   }
-  else if (unit) { clearAnnotationSelection(); dataStore.selectedUnit = unit; addSelectionVisual(unit); updateTransformPanel(); hideAnnotationEditPanel(); }
-  else { clearAnnotationSelection(); clearSelectionVisuals(); dataStore.selectedUnit = null; updateTransformPanel(); hideAnnotationEditPanel(); }
+  else if (unit) { clearAnnotationSelection(); dataStore.selectedUnit = unit; unitManager.addSelectionVisual(unit); updateTransformPanel(); hideAnnotationEditPanel(); }
+  else { clearAnnotationSelection(); unitManager.clearSelectionVisuals(); dataStore.selectedUnit = null; updateTransformPanel(); hideAnnotationEditPanel(); }
 }
 
 function onMouseDown(e) {
@@ -1244,11 +661,7 @@ function onCanvasMouseMove(e) {
       } else {
         dragTarget.position.y = modelManager.getModelSurfaceHeight(dragTarget.position.x, dragTarget.position.z);
       }
-      // 同步更新精灵位置
-      const sprite = unitLabelSprites.find(s => s.userData.parentUnit === dragTarget);
-      if (sprite) {
-        sprite.position.set(dragTarget.position.x, dragTarget.position.y + sprite.userData.offsetY, dragTarget.position.z);
-      }
+      unitManager.updateUnitSprite(dragTarget);
       if (dragTarget === dataStore.selectedUnit) {
         document.getElementById('posX').value = dragTarget.position.x.toFixed(2);
         document.getElementById('posY').value = dragTarget.position.y.toFixed(2);
@@ -1308,25 +721,17 @@ function onKeyDown(e) {
   if (key === 'f') toggleFreeRoamMode();
   if (e.key === 'Delete' || e.key === 'Backspace') {
     if (dataStore.selectedAnnotation && !e.target.closest('input')) {
-      sceneManager.getScene().remove(dataStore.selectedAnnotation); const idx = annotationMeshes.indexOf(dataStore.selectedAnnotation);
-      if (idx > -1) annotationMeshes.splice(idx, 1);
-      dataStore.selectedAnnotation = null; showToast('🗑️ 标注已删除'); updateAnnotCount();
+      annotationManager.deleteAnnotation(dataStore.selectedAnnotation);
+      showToast('🗑️ 标注已删除'); updateAnnotCount();
     } else if (dataStore.selectedUnit && !e.target.closest('input')) {
-      sceneManager.getScene().remove(dataStore.selectedUnit); const idx = unitMeshes.indexOf(dataStore.selectedUnit);
-      if (idx > -1) unitMeshes.splice(idx, 1);
-      // 同时删除关联的精灵
-      const spriteIdx = unitLabelSprites.findIndex(s => s.userData.parentUnit === dataStore.selectedUnit);
-      if (spriteIdx > -1) {
-        sceneManager.getScene().remove(unitLabelSprites[spriteIdx]);
-        unitLabelSprites.splice(spriteIdx, 1);
-      }
-      dataStore.selectedUnit = null; showToast('🗑️ 单位已删除'); updateUnitList(); updateTransformPanel();
+      unitManager.deleteUnit(dataStore.selectedUnit);
+      showToast('🗑️ 单位已删除'); updateUnitList(); updateTransformPanel();
     }
   }
   if (e.key === 'Escape') {
     if (sceneManager.freeRoamMode && sceneManager.isPointerLocked) { document.exitPointerLock(); return; }
     dataStore.placementMode = null; arrowStart = null; dataStore.selectedUnit = null; dataStore.selectedAnnotation = null;
-    clearSelectionVisuals(); clearAnnotationSelection(); updateToolbarSelection(); updateTransformPanel();
+    unitManager.clearSelectionVisuals(); clearAnnotationSelection(); updateToolbarSelection(); updateTransformPanel();
     hideAnnotationEditPanel();
   }
 }
@@ -1360,16 +765,6 @@ function onResize() {
   sceneManager.onResize();
 }
 
-function addSelectionVisual(unit) {
-  const ring = new THREE.Mesh(
-    new THREE.RingGeometry(0.8, 1.0, 32),
-    new THREE.MeshBasicMaterial({ color: 0xfbbf24, transparent: true, opacity: 0.7, side: THREE.DoubleSide })
-  );
-  ring.rotation.x = -Math.PI / 2; ring.position.y = 0.1; ring.name = 'selectionRing'; unit.add(ring);
-}
-function clearSelectionVisuals() {
-  unitMeshes.forEach(u => { const ring = u.getObjectByName('selectionRing'); if (ring) u.remove(ring); });
-}
 function addAnnotationSelection(annotation) {
   const ring = new THREE.Mesh(
     new THREE.RingGeometry(1.2, 1.5, 32),
@@ -1378,7 +773,7 @@ function addAnnotationSelection(annotation) {
   ring.rotation.x = -Math.PI / 2; ring.position.y = 0.15; ring.name = 'annotSelectionRing'; annotation.add(ring);
 }
 function clearAnnotationSelection() {
-  annotationMeshes.forEach(a => { const ring = a.getObjectByName('annotSelectionRing'); if (ring) a.remove(ring); });
+  annotationManager.meshes.forEach(a => { const ring = a.getObjectByName('annotSelectionRing'); if (ring) a.remove(ring); });
 }
 
 let currentActiveTool = null;
@@ -2083,10 +1478,10 @@ function populateCustomGrid() {
   const customGrid = document.getElementById('customGrid');
   if (!customGrid) return;
 
-  UNIT_CATEGORIES.custom.units = { ...customItemsRegistry };
+  UNIT_CATEGORIES.custom.units = { ...unitManager.customItemsRegistry };
 
   let html = '';
-  for (const [key, item] of Object.entries(customItemsRegistry)) {
+  for (const [key, item] of Object.entries(unitManager.customItemsRegistry)) {
     const colorHex = '#' + item.color.toString(16).padStart(6, '0');
     html += `<div class="unit-card" data-unit="${key}">
       <div class="uc-color" style="background:${colorHex};"></div>
@@ -2103,7 +1498,7 @@ function populateCustomGrid() {
   customGrid.querySelectorAll('.unit-card').forEach(card => {
     card.addEventListener('click', () => {
       const unitType = card.dataset.unit;
-      const item = customItemsRegistry[unitType];
+      const item = unitManager.customItemsRegistry[unitType];
       if (dataStore.placementMode === unitType) {
         dataStore.placementMode = null;
         card.classList.remove('active');
@@ -2143,7 +1538,7 @@ function renderPlayerGrid() {
         document.querySelectorAll('.unit-card').forEach(c => c.classList.remove('active'));
         document.querySelectorAll('.nav-tool-btn').forEach(b => { if (['arrow','zone','label'].includes(b.dataset.tool)) b.classList.remove('active'); });
         card.classList.add('active');
-        const def = getUnitDef(unitType);
+        const def = unitManager.getUnitDef(unitType);
         showToast(`🎯 放置模式: ${def.icon} ${def.label} — 点击场景放置`);
       }
       document.getElementById('zoneOptions')?.classList.remove('visible');
@@ -2269,7 +1664,7 @@ function wireUIEvents() {
         document.querySelectorAll('.unit-card').forEach(c => c.classList.remove('active'));
         document.querySelectorAll('.nav-tool-btn').forEach(b => { if (['arrow','zone','label'].includes(b.dataset.tool)) b.classList.remove('active'); });
         card.classList.add('active');
-        const def = getUnitDef(unitType);
+        const def = unitManager.getUnitDef(unitType);
         showToast(`🎯 放置模式: ${def.icon} ${def.label} — 点击场景放置`);
       }
       document.getElementById('zoneOptions')?.classList.remove('visible');
@@ -2316,19 +1711,19 @@ function wireUIEvents() {
     const newLabel = e.target.value;
     dataStore.selectedUnit.userData.label = newLabel;
     // 更新独立sprite文字
-    const oldSprite = unitLabelSprites.find(s => s.userData.parentUnit === dataStore.selectedUnit);
+    const oldSprite = unitManager.labelSprites.find(s => s.userData.parentUnit === dataStore.selectedUnit);
     if (oldSprite) {
       sceneManager.getScene().remove(oldSprite);
-      const idx = unitLabelSprites.indexOf(oldSprite);
-      if (idx > -1) unitLabelSprites.splice(idx, 1);
-      const def = getUnitDef(dataStore.selectedUnit.userData.type);
-      const newSprite = createTextSprite(newLabel || def.label, def.color);
+      const idx = unitManager.labelSprites.indexOf(oldSprite);
+      if (idx > -1) unitManager.labelSprites.splice(idx, 1);
+      const def = unitManager.getUnitDef(dataStore.selectedUnit.userData.type);
+      const newSprite = unitManager.createTextSprite(newLabel || def.label, def.color);
       const spriteY = 0.5;
       newSprite.position.set(dataStore.selectedUnit.position.x, dataStore.selectedUnit.position.y + spriteY, dataStore.selectedUnit.position.z);
       newSprite.userData.parentUnit = dataStore.selectedUnit;
       newSprite.userData.offsetY = spriteY;
       sceneManager.getScene().add(newSprite);
-      unitLabelSprites.push(newSprite);
+      unitManager.labelSprites.push(newSprite);
     }
     updateUnitList();
   });
@@ -2343,12 +1738,12 @@ function wireUIEvents() {
 
   // ─── Clear buttons ───
   document.getElementById('clearAnnotBtn')?.addEventListener('click', () => {
-    annotationMeshes.forEach(a => sceneManager.getScene().remove(a)); annotationMeshes.length = 0;
+    annotationManager.clearAll();
     showToast('🗑️ 所有标注已清除'); updateAnnotCount();
   });
   document.getElementById('clearUnitsBtn')?.addEventListener('click', () => {
-    unitMeshes.forEach(u => sceneManager.getScene().remove(u)); unitMeshes.length = 0;
-    unitLabelSprites.forEach(s => sceneManager.getScene().remove(s)); unitLabelSprites.length = 0;
+    unitManager.meshes.forEach(u => sceneManager.getScene().remove(u)); unitManager.meshes.length = 0;
+    unitManager.labelSprites.forEach(s => sceneManager.getScene().remove(s)); unitManager.labelSprites.length = 0;
     dataStore.selectedUnit = null; showToast('🗑️ 所有单位已清除'); updateUnitList(); updateTransformPanel();
   });
 
@@ -2775,14 +2170,14 @@ function renderPhaseBar() {
 function updateUnitList() {
   const container = document.getElementById('unitListContainer'); if (!container) return;
   const countEl = document.getElementById('unitCount');
-  if (countEl) countEl.textContent = unitMeshes.length;
-  if (unitMeshes.length === 0) {
+  if (countEl) countEl.textContent = unitManager.meshes.length;
+  if (unitManager.meshes.length === 0) {
     container.innerHTML = `<div style="text-align:center; padding:20px; color:#475569; font-size:11px;">暂无单位<br><span style="font-size:9px;">从左侧面板选择单位并点击场景放置</span></div>`;
     return;
   }
   // Group by monster / player
-  const monsters = unitMeshes.filter(u => u.userData.isMonster);
-  const players = unitMeshes.filter(u => !u.userData.isMonster);
+  const monsters = unitManager.meshes.filter(u => u.userData.isMonster);
+  const players = unitManager.meshes.filter(u => !u.userData.isMonster);
   let html = '';
   if (monsters.length > 0) {
     html += `<div style="font-size:9px; font-weight:700; color:#f97316; padding:2px 4px; margin-bottom:2px;">👹 怪物 (${monsters.length})</div>`;
@@ -2796,21 +2191,18 @@ function updateUnitList() {
   container.querySelectorAll('.unit-list-item').forEach(item => {
     item.addEventListener('click', () => {
       const name = item.dataset.name;
-      const unit = unitMeshes.find(u => u.name === name);
-      if (unit) { clearSelectionVisuals(); dataStore.selectedUnit = unit; addSelectionVisual(unit); updateTransformPanel(); }
+      const unit = unitManager.meshes.find(u => u.name === name);
+      if (unit) { unitManager.clearSelectionVisuals(); dataStore.selectedUnit = unit; unitManager.addSelectionVisual(unit); updateTransformPanel(); }
     });
   });
   container.querySelectorAll('.unit-del-btn').forEach(btn => {
     btn.addEventListener('click', (e) => {
       e.stopPropagation();
       const name = btn.dataset.name;
-      const unit = unitMeshes.find(u => u.name === name);
+      const unit = unitManager.meshes.find(u => u.name === name);
       if (unit) {
-        sceneManager.getScene().remove(unit);
-        const idx = unitMeshes.indexOf(unit); if (idx > -1) unitMeshes.splice(idx, 1);
-        const spriteIdx = unitLabelSprites.findIndex(s => s.userData.parentUnit === unit);
-        if (spriteIdx > -1) { sceneManager.getScene().remove(unitLabelSprites[spriteIdx]); unitLabelSprites.splice(spriteIdx, 1); }
-        if (dataStore.selectedUnit === unit) { dataStore.selectedUnit = null; updateTransformPanel(); }
+        unitManager.deleteUnit(unit);
+        updateTransformPanel();
         showToast('🗑️ 单位已删除'); updateUnitList();
       }
     });
@@ -2819,7 +2211,7 @@ function updateUnitList() {
 }
 
 function buildUnitListItem(u) {
-  const def = getUnitDef(u.userData.type);
+  const def = unitManager.getUnitDef(u.userData.type);
   const isSelected = u === dataStore.selectedUnit;
   const colorHex = '#' + def.color.toString(16).padStart(6, '0');
   return `<div class="unit-list-item" data-name="${u.name}" style="display:flex; align-items:center; gap:5px; padding:4px 6px; border-radius:5px; cursor:pointer; margin-bottom:1px; border:1px solid ${isSelected ? 'rgba(168,85,247,0.3)' : 'transparent'}; background:${isSelected ? 'rgba(168,85,247,0.1)' : 'transparent'}; transition:all 0.12s;">
@@ -2877,11 +2269,7 @@ function applyTransform() {
   dataStore.selectedUnit.rotation.set(rx, ry, rz);
   dataStore.selectedUnit.scale.set(scale, scale, scale);
   dataStore.selectedUnit.userData.unitScale = scale;
-  // 同步更新精灵位置
-  const sprite = unitLabelSprites.find(s => s.userData.parentUnit === dataStore.selectedUnit);
-  if (sprite) {
-    sprite.position.set(px, py + sprite.userData.offsetY, pz);
-  }
+  unitManager.updateUnitSprite(dataStore.selectedUnit);
 }
 
 function updateCurrentModelInfo() {
@@ -2895,7 +2283,7 @@ function updateCurrentModelInfo() {
 }
 
 function updateAnnotCount() {
-  const el = document.getElementById('annotCount'); if (el) el.textContent = annotationMeshes.length;
+  const el = document.getElementById('annotCount'); if (el) el.textContent = annotationManager.meshes.length;
 }
 
 // ═══════════════════════════════════════════════════════════
