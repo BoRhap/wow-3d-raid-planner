@@ -185,3 +185,6 @@ src/
 - **依赖注入**：所有模块通过构造函数接收依赖，[App.js](src/App.js) 是唯一的组装点
 - **单向数据流**：`DataStore` → `业务模块` → `渲染/UI 模块`
 - **纯数据分离**：`Constants.js` 和 `DataStore.js` 不依赖 Three.js，可独立测试
+
+## 联系作者
+wx:sincerelyfox
