@@ -185,3 +185,6 @@ src/
 - **Dependency Injection**: All modules receive their dependencies via constructor; [App.js](src/App.js) is the sole composition root
 - **Unidirectional Data Flow**: `DataStore` → `Domain Modules` → `Rendering/UI`
 - **Pure Data Separation**: `Constants.js` and `DataStore.js` have zero Three.js or DOM dependencies — they are independently testable
+
+## Contact author
+wx:sincerelyfox
